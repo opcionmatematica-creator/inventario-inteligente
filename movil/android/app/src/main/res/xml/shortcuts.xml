@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Acceso directo (mantener pulsado el icono) para volver a la pantalla de conexión. -->
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:shortcutId="cambiar_pc"
+        android:enabled="true"
+        android:icon="@mipmap/ic_launcher"
+        android:shortcutShortLabel="@string/atajo_cambiar_corto"
+        android:shortcutLongLabel="@string/atajo_cambiar_largo">
+        <intent
+            android:action="com.inventariointeligente.caja.CAMBIAR_PC"
+            android:targetPackage="com.inventariointeligente.caja"
+            android:targetClass="com.inventariointeligente.caja.MainActivity" />
+    </shortcut>
+</shortcuts>

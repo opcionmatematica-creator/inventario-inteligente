@@ -1,0 +1,50 @@
+plugins {
+    id "com.android.application"
+}
+
+// Firma del release: se lee de keystore.properties (ignorado por git).
+// Si no existe, el release queda SIN firmar (no se usa la clave de depuración).
+def propsFirma = rootProject.file("keystore.properties")
+def firma = new Properties()
+if (propsFirma.exists()) {
+    propsFirma.withInputStream { firma.load(it) }
+}
+
+android {
+    namespace = "com.inventariointeligente.caja"
+    compileSdk {
+        version = release(36) {
+            minorApiLevel = 1
+        }
+    }
+
+    defaultConfig {
+        applicationId = "com.inventariointeligente.caja"
+        minSdk = 26
+        targetSdk = 36
+        versionCode = 1
+        versionName = "0.2.0"
+    }
+
+    signingConfigs {
+        if (propsFirma.exists()) {
+            release {
+                storeFile = rootProject.file(firma["storeFile"])
+                storePassword = firma["storePassword"]
+                keyAlias = firma["keyAlias"]
+                keyPassword = firma["keyPassword"]
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            if (propsFirma.exists()) {
+                signingConfig = signingConfigs.release
+            }
+            minifyEnabled = false
+        }
+    }
+}
+
+// Sin dependencias externas: solo el SDK de Android.

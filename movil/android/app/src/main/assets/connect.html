@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Conectar - Inventario</title>
+<link rel="stylesheet" href="estilo.css">
+</head>
+<body>
+<main>
+  <header>
+    <span class="logo"><svg viewBox="0 0 34 34" aria-hidden="true"><path d="M17 3 L30 10.5 L30 25.5 L17 31 L4 25.5 L4 10.5 Z" fill="#fff"/><path d="M4 10.5 L17 18 L30 10.5 M17 18 L17 31" fill="none" stroke="#0f766e" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/></svg></span>
+    <div><h1>Inventario</h1><p>Conecta con el PC del comercio</p></div>
+  </header>
+
+  <form class="card" id="form" autocomplete="off">
+    <label for="direccion">Dirección del PC</label>
+    <input id="direccion" type="text" inputmode="url" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="http://192.168.1.20:8470">
+
+    <label for="clave">Clave</label>
+    <input id="clave" type="text" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="La que muestra el PC">
+
+    <p class="nota">También puedes pegar en «Dirección del PC» el enlace completo que muestra el PC (<code>http://IP:8470/?clave=XXXX</code>): se separan solos la dirección y la clave.</p>
+
+    <button type="submit" class="btn pri" id="conectar">Conectar</button>
+    <div id="msg" role="status"></div>
+  </form>
+
+  <section class="card">
+    <h2>Cable USB</h2>
+    <button type="button" class="btn sec" id="usb" style="margin-top:0">Conectar por cable USB</button>
+    <p class="nota">Con el celular conectado al PC. No necesita Wi-Fi ni clave. Antes, en el PC: <code>adb reverse tcp:8470 tcp:8470</code></p>
+  </section>
+
+  <p class="nota">Para conectar por Wi-Fi, en el PC activa «acceso desde otros dispositivos» en Ajustes de Inventario.</p>
+</main>
+<script src="connect.js"></script>
+</body>
+</html>

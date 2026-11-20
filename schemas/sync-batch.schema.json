@@ -1,0 +1,132 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Inventory telemetry batch v1",
+  "description": "Delta de movimientos contiguos. Validar además continuidad, conteos, zona IANA y tamaño UTF-8 <=262144 bytes.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "batch_id",
+    "stream_id",
+    "created_at",
+    "timezone",
+    "currency",
+    "money_scale",
+    "first_seq",
+    "last_seq",
+    "event_count",
+    "rows"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "batch_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "stream_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "timezone": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100
+    },
+    "currency": {
+      "const": "COP"
+    },
+    "money_scale": {
+      "type": "integer",
+      "const": 2
+    },
+    "first_seq": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "last_seq": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "event_count": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 500
+    },
+    "rows": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 500,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "product_ref",
+          "day",
+          "event_count",
+          "last_seq",
+          "stock_after",
+          "received_units",
+          "sold_units",
+          "waste_units",
+          "revenue_minor",
+          "cogs_minor",
+          "waste_minor"
+        ],
+        "properties": {
+          "product_ref": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$"
+          },
+          "day": {
+            "type": "string",
+            "format": "date"
+          },
+          "event_count": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 500
+          },
+          "last_seq": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "stock_after": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "received_units": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "sold_units": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "waste_units": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "revenue_minor": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "cogs_minor": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "waste_minor": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      }
+    }
+  }
+}

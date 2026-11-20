@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "inventario-inteligente"
+version = "0.2.0"
+description = "Caja e inventario sin internet para pequeños comercios, con analítica explicable."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE.md" }
+dependencies = []
+
+[project.scripts]
+inventario-inteligente = "inventario.app:main"
+inventario-servidor = "inventario.server:main"
+
+[tool.setuptools]
+packages = ["inventario"]
+
+[tool.setuptools.package-data]
+inventario = ["web/*"]

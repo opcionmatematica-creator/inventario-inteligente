@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Inventario</string>
+    <string name="atajo_cambiar_corto">Cambiar de PC</string>
+    <string name="atajo_cambiar_largo">Cambiar de PC</string>
+    <string name="descargando">Descargando…</string>
+    <string name="descarga_fallida">No se pudo iniciar la descarga</string>
+    <string name="sin_selector">No hay ninguna aplicación para elegir archivos.</string>
+</resources>

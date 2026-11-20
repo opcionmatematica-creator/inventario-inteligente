@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  El servidor es una IP privada (red local) cambiante, por lo que no se puede
+  limitar por dominio: se permite HTTP en claro. Los certificados instalados
+  por el usuario no se confían (solo los del sistema).
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

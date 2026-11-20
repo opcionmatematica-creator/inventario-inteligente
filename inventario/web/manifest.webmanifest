@@ -1,0 +1,12 @@
+{
+  "name": "Inventario Inteligente",
+  "short_name": "Inventario",
+  "description": "Caja e inventario para pequeños comercios, sin depender de internet.",
+  "lang": "es",
+  "start_url": "/#/caja",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f6f7f9",
+  "theme_color": "#0f766e",
+  "icons": [{ "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }]
+}

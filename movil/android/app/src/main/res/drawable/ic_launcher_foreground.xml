@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Caja/paquete blanca estilizada (cubo isométrico) dentro de la zona segura. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,29 L77,42 L77,67 L54,80 L31,67 L31,42 Z" />
+    <path
+        android:strokeColor="#0f766e"
+        android:strokeWidth="3"
+        android:strokeLineJoin="round"
+        android:strokeLineCap="round"
+        android:pathData="M31,42 L54,55 L77,42 M54,55 L54,80" />
+    <path
+        android:fillColor="#99d5cf"
+        android:pathData="M42.5,35.5 L65.5,48.5 L65.5,53 L42.5,40 Z" />
+</vector>

@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sin conexión - Inventario</title>
+<link rel="stylesheet" href="estilo.css">
+</head>
+<body>
+<main>
+  <header>
+    <span class="logo"><svg viewBox="0 0 34 34" aria-hidden="true"><path d="M17 3 L30 10.5 L30 25.5 L17 31 L4 25.5 L4 10.5 Z" fill="#fff"/><path d="M4 10.5 L17 18 L30 10.5 M17 18 L17 31" fill="none" stroke="#0f766e" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/></svg></span>
+    <div><h1>Inventario</h1><p>No se pudo conectar</p></div>
+  </header>
+  <section class="card">
+    <div id="msg" class="err" role="alert" style="margin:0"></div>
+    <button type="button" class="btn pri" id="reintentar">Reintentar</button>
+    <button type="button" class="btn sec" id="cambiar">Cambiar de PC</button>
+  </section>
+</main>
+<script>
+(function () {
+  var m = new URLSearchParams(window.location.search).get('m');
+  document.getElementById('msg').textContent = m ||
+    'No se pudo cargar Inventario. Revisa que el PC esté encendido, con Inventario abierto y en la misma red Wi-Fi.';
+  document.getElementById('reintentar').addEventListener('click', function () {
+    window.location.href = 'inv-app://reintentar';
+  });
+  document.getElementById('cambiar').addEventListener('click', function () {
+    window.location.href = 'inv-app://cambiar';
+  });
+})();
+</script>
+</body>
+</html>

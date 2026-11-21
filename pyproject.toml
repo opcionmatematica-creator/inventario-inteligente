@@ -19,4 +19,4 @@ inventario-servidor = "inventario.server:main"
 packages = ["inventario"]
 
 [tool.setuptools.package-data]
-inventario = ["web/*"]
+inventario = ["web/*", "legal/*"]

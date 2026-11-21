@@ -13,6 +13,9 @@ se pierde dinero, con explicaciones claras en cada sugerencia.
 > [LICENCIA-COMERCIAL.md](LICENCIA-COMERCIAL.md).
 >
 > **No emite factura electrónica** ni el documento equivalente POS electrónico de la DIAN.
+>
+> Manual: [docs/manual-usuario.md](docs/manual-usuario.md). Planes y documentos legales (borradores):
+> [LICENCIA-COMERCIAL.md](LICENCIA-COMERCIAL.md).
 
 ## Qué hace hoy
 
@@ -80,7 +83,7 @@ venta, la venta queda guardada en el celular y se envía sola al volver.
 ## Desarrollo
 
 ```bash
-python3 -m unittest discover -s tests -v     # 68 pruebas, sin red ni dependencias
+python3 -m unittest discover -s tests -v     # 73 pruebas, sin red ni dependencias
 python3 -m inventario.server --puerto 8470   # solo el servidor
 python3 -m inventario.demo                   # demo del protocolo de sincronización
 ```

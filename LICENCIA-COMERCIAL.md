@@ -9,6 +9,20 @@ El código de este repositorio es público, pero **no es software libre para uso
 | **Usarlo en un negocio** (tienda, ferretería, minimercado, distribuidora…) | **Sí** |
 | Revenderlo, instalarlo a clientes, ofrecerlo como servicio o incluirlo en otro producto | **Sí** (licencia de distribución) |
 
+## Planes
+
+| Plan | Productos activos | Usuarios | Para |
+|---|---:|---:|---|
+| Evaluación (sin licencia) | 100 | 2 | Probar el programa o uso no comercial |
+| Esencial | 500 | 2 | Tienda pequeña |
+| Inteligente | 5.000 | 5 | Minimercado, ferretería |
+| Negocio | 25.000 | 20 | Comercio grande |
+
+La licencia es un texto firmado digitalmente que se pega en **Ajustes → Licencia**; el programa lo
+verifica sin internet. Al llegar al límite solo se impiden altas nuevas: **vender, consultar,
+devolver y exportar funcionan siempre**, y una licencia vencida conserva el plan 15 días antes de
+volver a los límites de evaluación, sin borrar nada.
+
 ## Qué incluye la licencia comercial
 
 - Derecho de uso en el número de sucursales y equipos del plan contratado.
@@ -17,6 +31,14 @@ El código de este repositorio es público, pero **no es software libre para uso
 - Sus datos siguen siendo suyos: se guardan en su equipo y se pueden exportar a CSV en cualquier momento, también al terminar la licencia.
 
 Para contratar o consultar condiciones, abra una *issue* en este repositorio con el título «Licencia comercial» (sin datos sensibles) y le responderemos.
+
+## Documentos (borradores en revisión)
+
+- [Contrato de licencia de uso](inventario/legal/CONTRATO-LICENCIA.md) — se acepta al activar la licencia.
+- [Política de tratamiento de datos](inventario/legal/POLITICA-DATOS.md)
+- [Términos de venta](inventario/legal/TERMINOS-VENTA.md)
+- [Acuerdo de contribuidor (CLA)](inventario/legal/CLA.md)
+- [Avisos de terceros](AVISOS-TERCEROS.md)
 
 ## Contribuciones
 

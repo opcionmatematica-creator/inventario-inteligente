@@ -289,6 +289,41 @@ class UserAccessTests(ServerCase):
         self.assertEqual(self.login(owner["id"], "7391")[0], 200)
 
 
+class LicenseServerTests(ServerCase):
+    def test_activation_limits_and_legal_documents(self):
+        import sys
+        from pathlib import Path as P
+        from unittest import mock
+        sys.path.insert(0, str(P(__file__).resolve().parents[1] / "herramientas"))
+        import licencias as herramienta
+        from inventario import licencia
+        key = herramienta.generate_keys(1024)
+        n, d = int(key["n"]), int(key["d"])
+        self.addCleanup(mock.patch.object(licencia, "PUBLIC_N", n).stop)
+        mock.patch.object(licencia, "PUBLIC_N", n).start()
+        state = self.call("GET", "/api/v1/estado")[1]
+        self.assertEqual((state["plan"]["name"], state["plan"]["licensed"]), ("Evaluación", False))
+        text = licencia.encode({"v": 1, "licencia_id": "L1", "titular": "Tienda X", "plan": "esencial",
+                                "emitida": "2026-11-21", "vence": None, "productos": 2}, n, d)
+        self.assertEqual(self.call("POST", "/api/v1/licencia", {"license": text, "accept_terms": False})[0], 422)
+        self.assertEqual(self.call("POST", "/api/v1/licencia", {"license": "INV1.x.y", "accept_terms": True})[0], 422)
+        status, info, _ = self.call("POST", "/api/v1/licencia", {"license": text, "accept_terms": True})
+        self.assertEqual((status, info["name"], info["products"], info["terms_accepted"]["licencia_id"]),
+                         (200, "Esencial", 2, "L1"))
+        for sku in ("A", "B"):
+            self.assertEqual(self.call("POST", "/api/v1/productos", {"sku": sku, "price": 1, "cost": 1})[0], 201)
+        status, error, _ = self.call("POST", "/api/v1/productos", {"sku": "C", "price": 1, "cost": 1})
+        self.assertEqual(status, 422)
+        self.assertIn("plan Esencial permite 2", error["detail"])
+        self.assertEqual(self.call("POST", "/api/v1/movimientos", {"command_id": "m", "sku": "A", "kind": "receive",
+                                                                   "quantity": 3})[0], 200)  # sigue operando
+        status, body, response = self.call("GET", "/legal/CONTRATO-LICENCIA.md")
+        self.assertEqual(status, 200)
+        self.assertIn("text/plain", response.getheader("Content-Type"))
+        self.assertIn("Contrato de licencia", body.decode())
+        self.assertEqual(self.call("GET", "/legal/../server.py")[0], 404)
+
+
 @unittest.skipUnless(lan_addresses(), "sin dirección de red local para simular otro dispositivo")
 class RemoteAccessTests(ServerCase):
     """Un cliente que entra por la IP de la red local cuenta como otro dispositivo."""

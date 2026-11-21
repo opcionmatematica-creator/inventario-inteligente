@@ -818,6 +818,7 @@ async function vistaAjustes() {
       catch (error) { aviso(error.message, true); }
     } }, campo("Nombre del comercio", nombre), h("button", { class: "boton primario", type: "submit" }, "Guardar"))));
 
+  tarjetas.push(await tarjetaLicencia());
   tarjetas.push(await tarjetaUsuarios());
 
   if (estado.local) {
@@ -901,9 +902,52 @@ async function vistaAjustes() {
   tarjetas.push(h("section", { class: "tarjeta" }, h("h2", {}, "Acerca de"),
     h("p", { class: "tenue pequeno" }, `Inventario Inteligente ${estado.version}. Funciona sin internet: los datos se guardan en este equipo.`),
     h("p", { class: "pequeno" }, h("strong", {}, "Importante: "), "este programa no emite factura electrónica ni el documento equivalente POS electrónico de la DIAN. Si su negocio está obligado a facturar, úselo junto con su sistema de facturación autorizado. Consulte a su contador."),
-    h("p", { class: "tenue pequeno" }, "Licencia: uso no comercial gratuito (PolyForm Noncommercial 1.0.0). El uso en un negocio requiere una licencia comercial.")));
+    h("p", { class: "tenue pequeno" }, `Plan: ${estado.plan.name}${estado.plan.licensed ? "" : " (sin licencia comercial: uso no comercial o prueba)"}. `,
+      "Documentos: ", h("a", { href: "/legal/CONTRATO-LICENCIA.md", target: "_blank" }, "contrato de licencia"), " · ",
+      h("a", { href: "/legal/POLITICA-DATOS.md", target: "_blank" }, "tratamiento de datos"), " · ",
+      h("a", { href: "/legal/TERMINOS-VENTA.md", target: "_blank" }, "términos de venta"), ".")));
 
   vista.replaceChildren(pagina("Ajustes", null, h("div", { class: "rejilla" }, tarjetas)));
+}
+
+// Licencia comercial y límites del plan.
+async function tarjetaLicencia() {
+  const info = await api("/licencia");
+  const barra = (usado, limite, texto) => h("div", { class: "uso" },
+    h("div", { class: "uso-texto" }, h("span", {}, texto), h("span", { class: "tenue" }, `${pesos.format(usado)} de ${pesos.format(limite)}`)),
+    h("div", { class: "uso-barra" }, h("div", { style: `width:${Math.min(100, Math.round(usado * 100 / limite))}%`,
+      class: usado >= limite ? "lleno" : "" })));
+  const texto = h("textarea", { rows: "3", placeholder: "Pegue aquí la licencia (empieza por INV1.)", autocomplete: "off", spellcheck: "false" });
+  const acepto = h("input", { type: "checkbox", id: "acepto-contrato" });
+  const activar = h("button", { class: "boton primario", type: "submit" }, info.licensed ? "Cambiar licencia" : "Activar licencia");
+  const c = info.claims;
+  return h("section", { class: "tarjeta" }, h("h2", {}, "Licencia"),
+    h("p", {}, h("strong", {}, `Plan ${info.name}`),
+      info.licensed && c ? ` · ${c.titular}${c.vence ? ` · vence el ${c.vence}` : " · perpetua"}` : " · sin licencia comercial"),
+    info.warning ? h("p", { class: "etiqueta-estado media" }, info.warning) : null,
+    barra(info.usage.products, info.products, "Productos activos"),
+    barra(info.usage.users, info.users, "Usuarios activos"),
+    h("p", { class: "tenue pequeno" }, "Al llegar a un límite solo se impiden altas nuevas: vender, consultar, devolver y exportar funcionan siempre.",
+      info.licensed ? "" : " El modo evaluación sirve para probar el programa o para uso no comercial; en un negocio se requiere una licencia comercial."),
+    h("form", { onsubmit: async (e) => {
+      e.preventDefault();
+      if (!texto.value.trim()) { aviso("Pegue el texto de la licencia.", true); return; }
+      if (!acepto.checked) { aviso("Para activar la licencia hay que aceptar el contrato.", true); return; }
+      activar.disabled = true;
+      try {
+        const r = await api("/licencia", { method: "POST", body: { license: texto.value, accept_terms: true } });
+        aviso(`Licencia activada: plan ${r.name}.`);
+        await cargarEstado(); await vistaAjustes();
+      } catch (error) { aviso(error.message, true); activar.disabled = false; }
+    } }, campo("Licencia", texto),
+      h("label", { class: "casilla", for: "acepto-contrato" }, acepto,
+        h("span", {}, "He leído y acepto el ", h("a", { href: "/legal/CONTRATO-LICENCIA.md", target: "_blank" }, "contrato de licencia"),
+          ` (versión ${info.terms_version})`)),
+      h("div", { class: "acciones" }, activar)),
+    info.terms_accepted ? h("p", { class: "tenue pequeno" },
+      `Contrato aceptado: versión ${info.terms_accepted.version}, ${info.terms_accepted.at.slice(0, 16).replace("T", " ")}` +
+      (info.terms_accepted.user ? ` por ${info.terms_accepted.user}` : "") + ".") : null,
+    h("p", { class: "tenue pequeno" }, "Identificador de esta instalación (para licencias ligadas a un equipo): ", h("code", {}, info.installation)));
 }
 
 // Usuarios y PIN (solo el dueño, o cualquiera mientras no haya usuarios).
@@ -1097,6 +1141,7 @@ async function iniciar() {
   await mostrar();
   enviarPendientes();
   revisarReloj();
+  if (estado.plan && estado.plan.warning && !esCajero() && !(estado.users_enabled && !estado.user)) aviso(estado.plan.warning, true);
   setInterval(() => { cargarEstado().then(() => { revisarReloj(); return enviarPendientes(); }).catch(() => {}); }, 15000);
   // Contador de alertas: al cambiar de sección y cada minuto (no tras cada venta: con
   // catálogos grandes el cálculo cuesta y la caja no lo necesita en ese instante).

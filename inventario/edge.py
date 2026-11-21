@@ -147,6 +147,8 @@ class Edge:
         # (usuario que hace el movimiento, dueño que lo autoriza). El servidor lo fija bajo su
         # cerrojo antes de cada operación; None sin usuarios configurados.
         self.actor: tuple[int | None, int | None] = (None, None)
+        # Límites del plan (licencia). None = sin límites (uso como biblioteca y pruebas).
+        self.limits: dict | None = None
         with transaction(self.db):
             self.db.execute("INSERT OR IGNORE INTO metadata VALUES('stream_id', ?)", (str(uuid4()),))
             self.db.execute("INSERT OR IGNORE INTO metadata VALUES('timezone', ?)", (timezone,))
@@ -243,6 +245,8 @@ class Edge:
         values = self._product_values({"price": price, "cost": cost, "minimum": minimum, **extra},
                                       partial=False)
         values.setdefault("name", sku)
+        if values.get("active", 1):
+            self._check_limit("products")
         columns = ["sku", *values]
         try:
             self.db.execute(f"INSERT INTO products({','.join(columns)}) VALUES({','.join('?' * len(columns))})",
@@ -256,6 +260,8 @@ class Edge:
         values = self._product_values(fields, partial=True)
         if not values:
             return self.product(sku)
+        if values.get("active") == 1 and not self.product(sku)["active"]:
+            self._check_limit("products")
         try:
             self.db.execute(f"UPDATE products SET {', '.join(f'{k}=?' for k in values)} WHERE sku=?",
                             (*values.values(), sku))
@@ -649,6 +655,19 @@ class Edge:
     # Usuarios y PIN
     # ---------------------------------------------------------
 
+    def usage(self) -> dict:
+        return {"products": self.db.execute("SELECT count(*) FROM products WHERE active=1").fetchone()[0],
+                "users": self.db.execute("SELECT count(*) FROM users WHERE active=1").fetchone()[0]}
+
+    def _check_limit(self, kind: str) -> None:
+        """Solo frena altas nuevas: nunca la venta, la consulta ni la edición de lo existente."""
+        if self.limits is None:
+            return
+        if self.usage()[kind] >= self.limits[kind]:
+            what = "productos activos" if kind == "products" else "usuarios activos"
+            raise ValueError(f"el plan {self.limits['name']} permite {self.limits[kind]} {what}: desactive alguno"
+                             " o amplíe la licencia (Ajustes → Licencia)")
+
     @staticmethod
     def _pin_hash(pin: str, salt: bytes) -> bytes:
         return hashlib.pbkdf2_hmac("sha256", pin.encode(), salt, PIN_ITERATIONS)
@@ -676,6 +695,7 @@ class Edge:
         name = _text("nombre", name, maximum=40, required=True)
         if role not in ROLES:
             raise ValueError("rol desconocido")
+        self._check_limit("users")
         if role == "cajero" and not self.db.execute(
                 "SELECT 1 FROM users WHERE role='dueno' AND active=1").fetchone():
             raise ValueError("primero cree el usuario dueño")
@@ -708,6 +728,8 @@ class Edge:
             if active is not None:
                 if not isinstance(active, bool):
                     raise ValueError("activo debe ser verdadero o falso")
+                if active and not current["active"]:
+                    self._check_limit("users")
                 if not active and current["role"] == "dueno" and self.db.execute(
                         "SELECT count(*) FROM users WHERE role='dueno' AND active=1").fetchone()[0] <= 1:
                     raise ValueError("debe quedar al menos un dueño activo")

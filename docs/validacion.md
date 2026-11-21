@@ -143,6 +143,16 @@ Ejecutado en Linux, Python 3.12.3:
 - Celular (cable USB): pantalla «¿Quién atiende?», PIN con el teclado táctil, menú del cajero y sesión
   conservada al reabrir la app. Se corrigió un desbordamiento de la cabecera con el usuario.
 
+### Licencias y documentos (21 de noviembre de 2026)
+
+- 73 pruebas aprobadas. Nuevas: firma válida, plan alterado y firma recortada o de otra clave
+  rechazados, licencia pegada con saltos de línea, vencimiento con aviso, gracia de 15 días y vuelta
+  a evaluación, licencia ligada a otra instalación, límites que solo frenan altas (vender, recibir,
+  editar y desactivar siguen), reactivar cuenta como alta, importación CSV que marca las filas sin
+  cupo, la herramienta del vendedor no sobrescribe la clave (permisos 600), activación por la API
+  con aceptación obligatoria del contrato y documentos legales servidos como texto.
+- Borradores legales en `inventario/legal/` y `AVISOS-TERCEROS.md`; manual en `docs/manual-usuario.md`.
+
 Pendiente antes de vender a comercios: probar en Windows real; escaneo con cámara; instalador sin Python
 previo; integración con facturación electrónica DIAN o con el POS autorizado del comercio;
 licencias/planes en el software; piloto con comercios reales.

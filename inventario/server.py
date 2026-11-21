@@ -32,11 +32,14 @@ from urllib.parse import parse_qs, quote, unquote, urlsplit
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-from . import __version__, csvio
+from . import __version__, csvio, licencia
 from .edge import Edge, PriceChanged
 from .insights import Insights
 
 WEB = Path(__file__).parent / "web"
+LEGAL = Path(__file__).parent / "legal"
+# Versión del contrato de licencia que se acepta al activar una licencia (inventario/legal/).
+TERMS_VERSION = "2026-11-21"
 DEFAULT_PORT = 8470
 MAX_BODY = 5 * 1024 * 1024
 # Fecha que manda el dispositivo: se acepta hasta 10 min en el futuro (relojes algo
@@ -158,6 +161,11 @@ class App:
     def close(self):
         self.reader.close()
         self.edge.close()
+
+    def license(self) -> dict:
+        """Estado de la licencia de esta instalación (plan y límites efectivos)."""
+        row = self.edge.db.execute("SELECT value FROM metadata WHERE key='license_text'").fetchone()
+        return licencia.status(row[0] if row else None, self.edge.local_today(), self.edge.stream_id)
 
     def setting(self, key: str) -> str:
         return self.edge.db.execute("SELECT value FROM metadata WHERE key=?", (f"setting_{key}",)).fetchone()[0]
@@ -355,12 +363,16 @@ def make_handler(app: App):
             if not self.authorized():
                 self.send(401, (WEB / "sin-acceso.html").read_bytes(), content_type="text/html; charset=utf-8")
                 return
+            root = WEB
             relative = "index.html" if path in ("/", "") else path.lstrip("/")
-            target = (WEB / relative).resolve()
-            if WEB.resolve() not in target.parents or not target.is_file():
+            if relative.startswith("legal/"):  # contrato, privacidad…: texto, también sin licencia
+                root, relative = LEGAL, relative[len("legal/"):]
+            target = (root / relative).resolve()
+            if root.resolve() not in target.parents or not target.is_file():
                 raise ApiError(404, "no encontrado")
-            kind = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
-            if target.suffix in (".js", ".css", ".html", ".webmanifest", ".svg"):
+            kind = ("text/plain" if target.suffix == ".md" else
+                    mimetypes.guess_type(target.name)[0] or "application/octet-stream")
+            if target.suffix in (".js", ".css", ".html", ".webmanifest", ".svg", ".md"):
                 kind += "; charset=utf-8"
             headers = {"Cache-Control": "no-cache"}
             if target.name == "index.html":
@@ -390,7 +402,12 @@ def make_handler(app: App):
                 enabled = app.edge.has_users()
                 self.user = app.session_user(self.session_token()) if enabled else None
             if name == "usuarios":
-                return self.users_route(method, rest, enabled)
+                with app.lock:
+                    app.edge.limits = app.license()
+                try:
+                    return self.users_route(method, rest, enabled)
+                finally:
+                    app.edge.limits = None
             if enabled and self.user is None and (method, name) != ("GET", "estado"):
                 raise ApiError(401, "inicie sesión", login=True)
             authorized_by = None
@@ -414,10 +431,12 @@ def make_handler(app: App):
                 with app.lock:
                     app.edge.actor = (self.user["id"] if self.user else None,
                                       authorized_by if name in NEEDS_OWNER_PIN else None)
+                    app.edge.limits = app.license()
                     try:
                         status, payload, extra = self.routes(method, path, query, name, rest)
                     finally:
                         app.edge.actor = (None, None)
+                        app.edge.limits = None
             if self.user and self.user["role"] == "cajero" and name in ("productos", "buscar"):
                 payload = ([{k: v for k, v in p.items() if k not in COST_FIELDS} for p in payload]
                            if isinstance(payload, list) else {k: v for k, v in payload.items() if k not in COST_FIELDS})
@@ -578,15 +597,39 @@ def make_handler(app: App):
                         "headers": {"Content-Disposition": f'attachment; filename="{rest[0]}"'}}
                 if name == "respaldo":
                     return self.backup(method, rest)
+                if name == "licencia" and not rest:
+                    return 200, self.license_route(method), {}
                 if name == "ajustes":
                     return 200, self.settings(method), {}
             raise ApiError(404, "ruta desconocida")
+
+        def license_route(self, method: str) -> dict:
+            if method == "POST":
+                data = _body_json(self)
+                _require(data, "license", "accept_terms")
+                if data["accept_terms"] is not True:
+                    raise ApiError(422, "para activar la licencia hay que aceptar el contrato de licencia")
+                claims = licencia.decode(data["license"])
+                if claims.get("instalacion") and claims["instalacion"] != app.edge.stream_id:
+                    raise ApiError(422, "esta licencia es de otra instalación")
+                text = "".join(data["license"].split())
+                accepted = {"version": TERMS_VERSION, "at": app.now(), "licencia_id": claims["licencia_id"],
+                            "user": self.user["name"] if self.user else None}
+                app.edge.db.execute("INSERT OR REPLACE INTO metadata VALUES('license_text', ?)", (text,))
+                app.edge.db.execute("INSERT OR REPLACE INTO metadata VALUES('terms_accepted', ?)",
+                                    (json.dumps(accepted, ensure_ascii=False),))
+            status = app.license()
+            row = app.edge.db.execute("SELECT value FROM metadata WHERE key='terms_accepted'").fetchone()
+            return {**status, "usage": app.edge.usage(), "installation": app.edge.stream_id,
+                    "terms_version": TERMS_VERSION, "terms_accepted": json.loads(row[0]) if row else None}
 
         def state(self) -> dict:
             enabled = app.edge.has_users()
             login = [{"id": u["id"], "name": u["name"], "role": u["role"]}
                      for u in app.edge.users() if u["active"]] if enabled and self.user is None else None
+            plan = app.license()
             return {"version": __version__, "store_name": app.setting("store_name"),
+                    "plan": {"name": plan["name"], "licensed": plan["licensed"], "warning": plan["warning"]},
                     "users_enabled": enabled, "user": self.user, "login_users": login,
                     "timezone": app.edge.timezone, "currency": "COP", "today": app.edge.local_today(),
                     "local": self.is_local(), "time": formatdate(usegmt=True)}

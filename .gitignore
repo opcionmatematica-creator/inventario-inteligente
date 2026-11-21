@@ -12,3 +12,8 @@ __pycache__/
 build/
 dist/
 *.egg-info/
+
+# Material del vendedor: nunca en el repositorio
+clave_privada*.json
+registro-licencias.csv
+*.pem

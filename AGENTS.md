@@ -37,7 +37,7 @@ python3 --version
 # Ejecutar el entorno de demostración local.
 python3 -m inventario.demo
 
-# Ejecutar las pruebas (68, sin red ni dependencias).
+# Ejecutar las pruebas (73, sin red ni dependencias).
 python3 -m unittest discover -s tests -v
 
 # Abrir la app de escritorio / solo el servidor / datos de ejemplo.
@@ -147,6 +147,17 @@ dependencias de terceros (`pyproject.toml` no declara ninguna). El DDL usa
   quién hizo y quién autorizó cada evento (`user_id`, `authorized_by`); no viaja al sincronizar.
   PIN de 4–8 dígitos, no triviales, PBKDF2-SHA256 200.000 iteraciones; nunca registrar PIN.
   Recuperación solo con acceso al equipo: `python3 -m inventario.usuarios restablecer NOMBRE`.
+- Licencias (`inventario/licencia.py`): texto `INV1.<json>.<firma>` RSA-2048 PKCS#1 v1.5 SHA-256,
+  verificado sin red con la clave pública `PUBLIC_N`. La clave privada del vendedor está FUERA del
+  repo (`~/.config/inventario-inteligente-vendedor/clave_privada.json`, 600); emitir con
+  `herramientas/licencias.py emitir`. Nunca commitear claves ni el registro de licencias (ver
+  `.gitignore`). Planes y límites en `PLANS`; `Edge.limits` (fijado por el servidor antes de cada
+  escritura) solo frena altas de productos/usuarios; nunca bloquear venta, consulta, devolución ni
+  exportación. Vencida: 15 días de gracia y luego límites de evaluación. Las pruebas usan una clave
+  generada en la prueba.
+- Documentos legales (borradores con marcadores): `inventario/legal/` (servidos en `/legal/…`),
+  `AVISOS-TERCEROS.md`. Al activar una licencia se guarda `terms_accepted` (versión
+  `TERMS_VERSION` en `server.py`): si cambia el contrato, subir esa versión.
 - El servidor descarta siempre el cuerpo no leído de una petición (`dispatch`): si quedara en la
   conexión persistente, corrompería la siguiente petición.
 - Las recomendaciones son borradores con razones; no enviar órdenes a

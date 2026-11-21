@@ -207,6 +207,12 @@ form.motivo { margin-top: 10px; padding: 12px; border: 1px solid var(--borde); b
   background: var(--fondo); padding: 8px 10px; border-radius: 6px; border: 1px solid var(--borde); }
 .vista-previa { max-height: 340px; overflow: auto; margin-top: 10px; }
 .oculto { display: none !important; }
+.uso { margin: 10px 0; }
+.uso-texto { display: flex; justify-content: space-between; font-size: .9rem; margin-bottom: 4px; }
+.uso-barra { height: 8px; background: var(--fondo); border: 1px solid var(--borde); border-radius: 999px; overflow: hidden; }
+.uso-barra > div { height: 100%; background: var(--primario); }
+.uso-barra > div.lleno { background: var(--peligro); }
+textarea { width: 100%; padding: 8px 11px; border: 1px solid var(--borde); border-radius: 8px; background: var(--superficie); font-family: ui-monospace, monospace; font-size: .85rem; }
 /* Usuarios: el cajero no ve lo del dueño; sin sesión solo se ve la pantalla de entrada. */
 body.rol-cajero [data-dueno] { display: none !important; }
 body.sin-sesion .menu { display: none; }

@@ -140,6 +140,10 @@ def parse_products(data: bytes) -> dict:
 def plan_import(edge, parsed: dict) -> dict:
     """Clasifica cada fila: nuevo, actualizar (precio/costo/datos) o conflicto."""
     plan = []
+    # Cupo del plan para productos nuevos: las filas que no caben se marcan, no se importan a medias.
+    room = None
+    if edge.limits is not None:
+        room = max(0, edge.limits["products"] - edge.usage()["products"])
     for row in parsed["rows"]:
         existing = edge.db.execute("SELECT sku FROM products WHERE sku=?", (row["sku"],)).fetchone()
         if row["barcode"]:
@@ -149,6 +153,12 @@ def plan_import(edge, parsed: dict) -> dict:
                 plan.append({**row, "action": "conflicto",
                              "error": f"código de barras ya usado por {other[0]}"})
                 continue
+        if not existing and room is not None:
+            if room == 0:
+                plan.append({**row, "action": "conflicto",
+                             "error": f"supera el límite del plan {edge.limits['name']} ({edge.limits['products']} productos)"})
+                continue
+            room -= 1
         plan.append({**row, "action": "actualizar" if existing else "nuevo"})
     return {"rows": plan, "errors": parsed["errors"], "columns": parsed["columns"],
             "new": sum(r["action"] == "nuevo" for r in plan),

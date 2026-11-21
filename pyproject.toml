@@ -9,7 +9,8 @@ description = "Caja e inventario sin internet para pequeños comercios, con anal
 readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE.md" }
-dependencies = []
+# En Windows Python no trae la base de zonas horarias IANA (zoneinfo la necesita).
+dependencies = ["tzdata; sys_platform == 'win32'"]
 
 [project.scripts]
 inventario-inteligente = "inventario.app:main"

@@ -9,6 +9,10 @@ if (-not $python) {
     exit 1
 }
 $argumentos = if ($python.Name -like "pyw*") { "-3 -m inventario.app" } else { "-m inventario.app" }
+# Python de Windows no trae la base de zonas horarias que usa el programa (America/Bogota).
+$py = if ($python.Name -like "pyw*") { "py" } else { $python.Source -replace "pythonw.exe$", "python.exe" }
+& $py -m pip install --user --quiet tzdata
+if ($LASTEXITCODE -ne 0) { Write-Host "No se pudo instalar tzdata (hace falta internet la primera vez)."; exit 1 }
 $shell = New-Object -ComObject WScript.Shell
 foreach ($carpeta in @([Environment]::GetFolderPath("Programs"), [Environment]::GetFolderPath("Desktop"))) {
     $acceso = $shell.CreateShortcut((Join-Path $carpeta "Inventario Inteligente.lnk"))

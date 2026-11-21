@@ -9,11 +9,20 @@ de la misma red Wi-Fi funcionan como cajas adicionales.
 
 ## 1. Instalar y abrir
 
-1. Instale Python 3.11 o posterior (en Windows: `winget install Python.Python.3.12`).
-2. Descargue el programa y, en su carpeta, ejecute:
-   - **Windows:** `instalar\windows\instalar.ps1` (crea accesos en el escritorio y en Inicio).
-   - **Linux:** `bash instalar/linux/instalar.sh` (crea el acceso en el menú).
-3. Abra **Inventario Inteligente**. Se abre una ventana; cerrarla detiene el programa.
+**Windows 10 u 11** — ejecute `Inventario-Inteligente-<versión>-instalador-windows.exe`. No necesita
+Python ni permisos de administrador; crea los accesos en el escritorio y en el menú Inicio.
+
+- Si aparece **«Windows protegió su PC»** (SmartScreen): pulse **Más información → Ejecutar de todas
+  formas**. Aparece mientras el instalador no esté firmado digitalmente.
+- La primera vez que abra el programa, el **Firewall de Windows** puede preguntar si permite que
+  `pythonw.exe` se comunique: marque **Redes privadas** y acepte. Hace falta para que los celulares
+  del local se conecten; el computador funciona igual aunque lo rechace.
+- Actualizar = instalar la versión nueva encima. Desinstalar (Configuración → Aplicaciones)
+  **conserva sus datos** en `%LOCALAPPDATA%\InventarioInteligente`.
+
+**Linux** — con Python 3.11 o posterior: `bash instalar/linux/instalar.sh` (crea el acceso en el menú).
+
+Abra **Inventario Inteligente**: se abre una ventana; cerrarla detiene el programa.
 
 Para probarlo con datos de ejemplo: `python3 -m inventario.ejemplo CARPETA` y abrirlo con
 `INVENTARIO_DATOS=CARPETA`.

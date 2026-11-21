@@ -37,13 +37,16 @@ python3 --version
 # Ejecutar el entorno de demostración local.
 python3 -m inventario.demo
 
-# Ejecutar las pruebas (73, sin red ni dependencias).
+# Ejecutar las pruebas (74, sin red ni dependencias).
 python3 -m unittest discover -s tests -v
 
 # Abrir la app de escritorio / solo el servidor / datos de ejemplo.
 python3 -m inventario.app
 python3 -m inventario.server --puerto 8470 [--datos CARPETA] [--solo-local]
 python3 -m inventario.ejemplo /tmp/inventario-demo
+
+# Instalador de Windows (desde Linux, con Docker): dist/…-instalador-windows.exe
+bash instalar/windows/construir_instalador.sh
 
 # App Android (JDK 21 con javac).
 cd movil/android && ANDROID_HOME=~/Android/Sdk ./gradlew --offline assembleDebug
@@ -158,6 +161,11 @@ dependencias de terceros (`pyproject.toml` no declara ninguna). El DDL usa
 - Documentos legales (borradores con marcadores): `inventario/legal/` (servidos en `/legal/…`),
   `AVISOS-TERCEROS.md`. Al activar una licencia se guarda `terms_accepted` (versión
   `TERMS_VERSION` en `server.py`): si cambia el contrato, subir esa versión.
+- Windows: Python no trae la base IANA → `tzdata` es dependencia en Windows (pyproject) y va dentro
+  del instalador. Con `pythonw.exe` no hay stdout/stderr: `app.redirect_output_if_windowless` los
+  envía a `registro.log` en la carpeta de datos. Versiones y SHA-256 de Python embebido y tzdata
+  fijados en `instalar/windows/construir_instalador.sh`; al actualizarlas, tomar los hashes de
+  python.org (API de descargas) y de PyPI.
 - El servidor descarta siempre el cuerpo no leído de una petición (`dispatch`): si quedara en la
   conexión persistente, corrompería la siguiente petición.
 - Las recomendaciones son borradores con razones; no enviar órdenes a

@@ -153,6 +153,20 @@ Ejecutado en Linux, Python 3.12.3:
   con aceptación obligatoria del contrato y documentos legales servidos como texto.
 - Borradores legales en `inventario/legal/` y `AVISOS-TERCEROS.md`; manual en `docs/manual-usuario.md`.
 
+### Instalador de Windows (21 de noviembre de 2026)
+
+- `construir_instalador.sh` genera un `.exe` NSIS de 11 MB con Python 3.14.10 embebido y tzdata
+  2026.6 (SHA-256 verificados) en unos 30 s, desde Linux con Docker.
+- Probado con Wine 10.0 en un contenedor Debian: instalación silenciosa por usuario (sin
+  administrador), accesos de Inicio y escritorio, registro de desinstalación; Python embebido con app,
+  SQLite 3.50.4 y zona America/Bogota; **las 74 pruebas con el Python del instalador** (salvo el
+  ejemplo no copiado y el permiso POSIX, ajustado para Windows); servidor por HTTP desde fuera de Wine
+  (estado, interfaz, alta, venta, respaldo diario); desinstalación silenciosa que borra el programa y
+  el registro y conserva los datos. Con Wine, `pythonw.exe` sí tiene consola, así que la redirección al
+  registro solo se verificó con la prueba unitaria.
+- **No verificado:** Windows real (ventana de Edge en modo aplicación, SmartScreen, Firewall,
+  accesos directos al pulsarlos). Sin firma digital.
+
 Pendiente antes de vender a comercios: probar en Windows real; escaneo con cámara; instalador sin Python
 previo; integración con facturación electrónica DIAN o con el POS autorizado del comercio;
 licencias/planes en el software; piloto con comercios reales.

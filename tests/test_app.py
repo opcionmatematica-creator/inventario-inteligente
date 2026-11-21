@@ -484,3 +484,20 @@ class UserTests(unittest.TestCase):
         batch = json.dumps(Gateway(self.edge).prepare())
         for secret in ("Luis", "Ana", "user_id", "authorized_by"):
             self.assertNotIn(secret, batch)  # no viaja en la sincronización
+
+
+class WindowlessTests(unittest.TestCase):
+    def test_pythonw_without_console_logs_to_file(self):
+        import sys
+        from unittest import mock
+        from inventario import app
+        folder = TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        with mock.patch.object(sys, "stdout", None), mock.patch.object(sys, "stderr", None):
+            app.redirect_output_if_windowless(Path(folder.name))
+            print("hola desde pythonw")
+            sys.stderr.write("traza\n")
+            stream = sys.stdout
+        stream.close()
+        self.assertEqual((Path(folder.name) / "registro.log").read_text(encoding="utf-8"),
+                         "hola desde pythonw\ntraza\n")

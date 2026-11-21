@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 import sys
 from tempfile import TemporaryDirectory
@@ -94,7 +95,8 @@ class LicenseTests(unittest.TestCase):
         path = Path(folder.name) / "clave.json"
         with mock.patch.object(herramienta, "KEY_PATH", path), mock.patch("builtins.print"):
             herramienta.main(["generar-claves"])
-            self.assertEqual(oct(path.stat().st_mode & 0o777), "0o600")
+            if os.name != "nt":  # Windows no tiene permisos POSIX
+                self.assertEqual(oct(path.stat().st_mode & 0o777), "0o600")
             with self.assertRaises(SystemExit):
                 herramienta.main(["generar-claves"])
 

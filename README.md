@@ -43,9 +43,12 @@ python3 -m inventario.app            # abre la app (servidor local + ventana)
 ```
 
 - **Linux:** `bash instalar/linux/instalar.sh` crea el acceso en el menú de aplicaciones.
-- **Windows:** instale Python (`winget install Python.Python.3.12`) y ejecute
-  `powershell -ExecutionPolicy Bypass -File instalar\windows\instalar.ps1` (acceso en Inicio y
-  en el escritorio). También sirve `instalar\windows\Inventario.bat`. *No probado aún en un Windows real.*
+- **Windows (recomendado): instalador `.exe`** con Python incluido, sin permisos de administrador.
+  Se construye desde Linux con `bash instalar/windows/construir_instalador.sh` (Docker + NSIS; Python
+  embebido 3.14 y tzdata verificados por SHA-256) → `dist/Inventario-Inteligente-<versión>-instalador-windows.exe`.
+  Probado con Wine (instalación, servidor, pruebas y desinstalación); *pendiente en un Windows real*
+  y sin firma digital todavía (SmartScreen avisará).
+- **Windows con Python propio:** `powershell -ExecutionPolicy Bypass -File instalar\windows\instalar.ps1`.
 - **Como paquete:** `pipx install .` instala los comandos `inventario-inteligente` y `inventario-servidor`.
 
 Datos: `~/.local/share/inventario-inteligente` (Linux), `%LOCALAPPDATA%\InventarioInteligente`
@@ -83,7 +86,7 @@ venta, la venta queda guardada en el celular y se envía sola al volver.
 ## Desarrollo
 
 ```bash
-python3 -m unittest discover -s tests -v     # 73 pruebas, sin red ni dependencias
+python3 -m unittest discover -s tests -v     # 74 pruebas, sin red ni dependencias
 python3 -m inventario.server --puerto 8470   # solo el servidor
 python3 -m inventario.demo                   # demo del protocolo de sincronización
 ```

@@ -72,9 +72,27 @@ def open_window(url: str, profile: Path) -> subprocess.Popen | None:
     return subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=flags)
 
 
+LOG_MAX_BYTES = 1_000_000
+
+
+def redirect_output_if_windowless(folder: Path) -> None:
+    """Con pythonw.exe (Windows, sin consola) sys.stdout y sys.stderr son None: cualquier print o
+    traceback haría fallar el programa. Se envían a «registro.log» en la carpeta de datos."""
+    if sys.stdout is not None and sys.stderr is not None:
+        return
+    folder.mkdir(parents=True, exist_ok=True)
+    log = folder / "registro.log"
+    if log.exists() and log.stat().st_size > LOG_MAX_BYTES:
+        log.replace(folder / "registro.anterior.log")
+    stream = open(log, "a", encoding="utf-8", buffering=1)
+    sys.stdout = sys.stdout or stream
+    sys.stderr = sys.stderr or stream
+
+
 def main():
     port = int(os.environ.get("INVENTARIO_PUERTO", DEFAULT_PORT))
     folder = data_dir()
+    redirect_output_if_windowless(folder)
     url = f"http://127.0.0.1:{port}/"
     profile = folder / "ventana"
     if running(port):

@@ -37,7 +37,7 @@ python3 --version
 # Ejecutar el entorno de demostración local.
 python3 -m inventario.demo
 
-# Ejecutar las pruebas (62, sin red ni dependencias).
+# Ejecutar las pruebas (68, sin red ni dependencias).
 python3 -m unittest discover -s tests -v
 
 # Abrir la app de escritorio / solo el servidor / datos de ejemplo.
@@ -140,6 +140,15 @@ dependencias de terceros (`pyproject.toml` no declara ninguna). El DDL usa
   devoluciones solo anula lo pendiente; no se anula una anulación. `sold_delta` (columna) da la
   venta neta que usan resumen, demanda y «más vendidos». En sincronización viajan como
   `adjustments` (lote v2, ver `docs/sincronizacion.md`).
+- Usuarios (opcionales, tabla `users`): sin usuarios activos la app no pide PIN; con ellos, toda la
+  API salvo `GET /estado`, `/sesion` y crear el primer dueño exige sesión (cookie `inv_sesion`),
+  también desde 127.0.0.1. Roles `dueno` (todo) y `cajero` (`CASHIER_ROUTES` en `server.py`: caja,
+  productos sin campos de costo, ventas; devolver y anular con `pin_dueno`). `Edge.actor` guarda
+  quién hizo y quién autorizó cada evento (`user_id`, `authorized_by`); no viaja al sincronizar.
+  PIN de 4–8 dígitos, no triviales, PBKDF2-SHA256 200.000 iteraciones; nunca registrar PIN.
+  Recuperación solo con acceso al equipo: `python3 -m inventario.usuarios restablecer NOMBRE`.
+- El servidor descarta siempre el cuerpo no leído de una petición (`dispatch`): si quedara en la
+  conexión persistente, corrompería la siguiente petición.
 - Las recomendaciones son borradores con razones; no enviar órdenes a
   proveedores automáticamente.
 - No realizar commits, pushes, merges ni publicaciones salvo instrucción

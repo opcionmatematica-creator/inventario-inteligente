@@ -27,6 +27,7 @@ import secrets
 import socket
 import sys
 import threading
+import time
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -78,9 +79,18 @@ def lan_addresses() -> list[str]:
 
 
 class ApiError(Exception):
-    def __init__(self, status: int, message: str):
+    def __init__(self, status: int, message: str, **extra):
         super().__init__(message)
         self.status = status
+        self.extra = extra
+
+
+SESSION_HOURS = 12
+# Rutas que puede usar un cajero; devolver y anular exigen además el PIN de un dueño.
+CASHIER_ROUTES = {("GET", "estado"), ("GET", "productos"), ("GET", "buscar"), ("POST", "ventas"),
+                  ("GET", "ventas"), ("POST", "anulaciones"), ("POST", "devoluciones"), ("POST", "sesion")}
+NEEDS_OWNER_PIN = {"anulaciones", "devoluciones"}
+COST_FIELDS = ("cost", "lead_days", "pack", "moq")
 
 
 class App:
@@ -104,6 +114,46 @@ class App:
             for key, value in SETTINGS.items():
                 self.edge.db.execute("INSERT OR IGNORE INTO metadata VALUES(?, ?)", (f"setting_{key}", value))
         self.imports: dict[str, dict] = {}
+        self.sessions: dict[str, dict] = {}   # sha256(token) → {user_id, expires}
+        self.failures: dict[str, list] = {}   # ip → [fallos, bloqueado_hasta]
+
+    # -- sesiones y PIN ------------------------------------------------
+
+    def check_lock(self, ip: str):
+        count, until = self.failures.get(ip, [0, 0.0])
+        wait = until - time.monotonic()
+        if wait > 0:
+            raise ApiError(429, f"demasiados intentos con PIN incorrecto; espere {int(wait) + 1} s")
+
+    def register_attempt(self, ip: str, ok: bool):
+        if ok:
+            self.failures.pop(ip, None)
+            return
+        count, _ = self.failures.get(ip, [0, 0.0])
+        count += 1
+        # 5 fallos → 30 s; cada fallo más dobla la espera (máximo 15 min).
+        until = time.monotonic() + min(900, 30 * 2 ** (count - 5)) if count >= 5 else 0.0
+        self.failures[ip] = [count, until]
+
+    def new_session(self, user_id: int) -> str:
+        token = secrets.token_urlsafe(32)
+        now = time.time()
+        self.sessions = {k: v for k, v in self.sessions.items() if v["expires"] > now}
+        self.sessions[hashlib.sha256(token.encode()).hexdigest()] = {
+            "user_id": user_id, "expires": now + SESSION_HOURS * 3600}
+        return token
+
+    def session_user(self, token: str) -> dict | None:
+        if not token:
+            return None
+        entry = self.sessions.get(hashlib.sha256(token.encode()).hexdigest())
+        if not entry or entry["expires"] < time.time():
+            return None
+        user = self.edge.user(entry["user_id"])
+        return user if user and user["active"] else None
+
+    def drop_session(self, token: str):
+        self.sessions.pop(hashlib.sha256(token.encode()).hexdigest(), None)
 
     def close(self):
         self.reader.close()
@@ -150,6 +200,8 @@ class App:
 
 
 def _body_json(handler) -> dict:
+    if getattr(handler, "_json", None) is not None:  # ya leído por la capa de permisos
+        return handler._json
     raw = handler.body()
     try:
         data = json.loads(raw or b"{}")
@@ -157,6 +209,7 @@ def _body_json(handler) -> dict:
         raise ApiError(400, "JSON inválido") from exc
     if not isinstance(data, dict):
         raise ApiError(400, "se esperaba un objeto JSON")
+    handler._json = data
     return data
 
 
@@ -179,10 +232,14 @@ def make_handler(app: App):
         # -- utilidades ------------------------------------------------
 
         def body(self) -> bytes:
+            if self._body is not None:
+                return self._body
             length = int(self.headers.get("Content-Length") or 0)
             if length > MAX_BODY:
+                self.close_connection = True  # no se lee: la conexión no se reutiliza
                 raise ApiError(413, "petición demasiado grande (máx. 5 MB)")
-            return self.rfile.read(length) if length else b""
+            self._body = self.rfile.read(length) if length else b""
+            return self._body
 
         def send(self, status: int, payload, *, content_type="application/json; charset=utf-8",
                  headers: dict | None = None):
@@ -240,6 +297,19 @@ def make_handler(app: App):
             self.dispatch("PATCH")
 
         def dispatch(self, method: str):
+            self._body = None
+            try:
+                self.handle_request(method)
+            finally:
+                # Un cuerpo sin leer quedaría en la conexión persistente y corrompería la
+                # siguiente petición: se descarta siempre (o se cierra la conexión).
+                if self._body is None and int(self.headers.get("Content-Length") or 0):
+                    try:
+                        self.body()
+                    except ApiError:
+                        pass
+
+        def handle_request(self, method: str):
             url = urlsplit(self.path)
             path, query = url.path, parse_qs(url.query)
             try:
@@ -259,7 +329,7 @@ def make_handler(app: App):
                 else:
                     raise ApiError(405, "método no permitido")
             except ApiError as exc:
-                self.send(exc.status, {"detail": str(exc)})
+                self.send(exc.status, {"detail": str(exc), **exc.extra})
             except PriceChanged as exc:
                 self.send(409, {"detail": str(exc), "total_minor": exc.total_minor, "prices": exc.prices})
             except ValueError as exc:
@@ -301,12 +371,109 @@ def make_handler(app: App):
 
         # -- API -------------------------------------------------------
 
+        def session_token(self) -> str:
+            cookie = SimpleCookie(self.headers.get("Cookie") or "")
+            return cookie["inv_sesion"].value if "inv_sesion" in cookie else ""
+
         def api(self, method: str, path: str, query: dict):
-            parts = [unquote(p) for p in path.split("/")[3:] if p]  # tras /api/v1/
-            q = {k: v[-1] for k, v in query.items()}
+            """Capa de usuarios: sesión, permisos por rol y autorización del dueño."""
+            self._json = None
+            self.user = None
+            parts = [unquote(p) for p in path.split("/")[3:] if p]
             if not path.startswith("/api/v1/") or not parts:
                 raise ApiError(404, "ruta desconocida")
             name, rest = parts[0], parts[1:]
+            ip = self.client_address[0]
+            if name == "sesion":
+                return self.session_route(method, rest, ip)
+            with app.lock:
+                enabled = app.edge.has_users()
+                self.user = app.session_user(self.session_token()) if enabled else None
+            if name == "usuarios":
+                return self.users_route(method, rest, enabled)
+            if enabled and self.user is None and (method, name) != ("GET", "estado"):
+                raise ApiError(401, "inicie sesión", login=True)
+            authorized_by = None
+            if self.user and self.user["role"] == "cajero":
+                if (method, name) not in CASHIER_ROUTES or (name == "productos" and rest):
+                    raise ApiError(403, "esta acción la hace el dueño")
+                if method == "POST" and name in NEEDS_OWNER_PIN:
+                    pin = _body_json(self).get("pin_dueno")
+                    with app.lock:
+                        app.check_lock(ip)
+                        owner = app.edge.owner_by_pin(pin) if pin else None
+                        app.register_attempt(ip, owner is not None)
+                    if owner is None:
+                        raise ApiError(403, "hace falta el PIN del dueño para autorizar", owner_pin=True)
+                    authorized_by = owner["id"]
+            elif self.user:
+                authorized_by = self.user["id"]  # un dueño se autoriza a sí mismo
+            if method == "GET":
+                status, payload, extra = self.routes(method, path, query, name, rest)
+            else:
+                with app.lock:
+                    app.edge.actor = (self.user["id"] if self.user else None,
+                                      authorized_by if name in NEEDS_OWNER_PIN else None)
+                    try:
+                        status, payload, extra = self.routes(method, path, query, name, rest)
+                    finally:
+                        app.edge.actor = (None, None)
+            if self.user and self.user["role"] == "cajero" and name in ("productos", "buscar"):
+                payload = ([{k: v for k, v in p.items() if k not in COST_FIELDS} for p in payload]
+                           if isinstance(payload, list) else {k: v for k, v in payload.items() if k not in COST_FIELDS})
+            return status, payload, extra
+
+        def session_route(self, method: str, rest: list, ip: str):
+            if method != "POST":
+                raise ApiError(405, "método no permitido")
+            if rest == ["salir"]:
+                with app.lock:
+                    app.drop_session(self.session_token())
+                return 200, {"ok": True}, {"headers": {"Set-Cookie": "inv_sesion=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict"}}
+            if rest:
+                raise ApiError(404, "ruta desconocida")
+            data = _body_json(self)
+            _require(data, "user_id", "pin")
+            with app.lock:
+                app.check_lock(ip)
+                user = app.edge.check_pin(data["user_id"], data["pin"]) if type(data["user_id"]) is int else None
+                app.register_attempt(ip, user is not None)
+                if user is None:
+                    raise ApiError(401, "PIN incorrecto")
+                token = app.new_session(user["id"])
+            return 200, user, {"headers": {"Set-Cookie": f"inv_sesion={token}; Path=/; Max-Age={SESSION_HOURS * 3600};"
+                                                        " HttpOnly; SameSite=Strict"}}
+
+        def users_route(self, method: str, rest: list, enabled: bool):
+            # Sin usuarios, cualquiera con acceso al equipo puede crear el primer dueño.
+            if enabled and (self.user is None or self.user["role"] != "dueno"):
+                raise ApiError(401 if self.user is None else 403, "solo el dueño gestiona usuarios",
+                               login=self.user is None)
+            with app.lock:
+                if method == "GET" and not rest:
+                    return 200, app.edge.users(), {}
+                if method == "POST" and not rest:
+                    data = _body_json(self)
+                    _require(data, "name", "role", "pin")
+                    if not enabled and data["role"] != "dueno":
+                        raise ApiError(422, "el primer usuario debe ser el dueño")
+                    user = app.edge.add_user(data["name"], data["role"], data["pin"])
+                    extra = {}
+                    if not enabled:  # quien activa el PIN queda con la sesión abierta
+                        token = app.new_session(user["id"])
+                        extra = {"headers": {"Set-Cookie": f"inv_sesion={token}; Path=/; Max-Age={SESSION_HOURS * 3600};"
+                                                           " HttpOnly; SameSite=Strict"}}
+                    return 201, user, extra
+                if method == "PATCH" and len(rest) == 1 and rest[0].isdigit():
+                    data = _body_json(self)
+                    unknown = set(data) - {"pin", "active", "name"}
+                    if unknown:
+                        raise ApiError(422, "campos desconocidos: " + ", ".join(sorted(unknown)))
+                    return 200, app.edge.update_user(int(rest[0]), **data), {}
+            raise ApiError(404, "ruta desconocida")
+
+        def routes(self, method: str, path: str, query: dict, name: str, rest: list):
+            q = {k: v[-1] for k, v in query.items()}
             if method == "GET" and name in ("tablero", "alertas", "compras", "analisis"):
                 with app.insights_lock:
                     return 200, {"tablero": app.insights.dashboard, "alertas": app.insights.alerts,
@@ -416,7 +583,11 @@ def make_handler(app: App):
             raise ApiError(404, "ruta desconocida")
 
         def state(self) -> dict:
+            enabled = app.edge.has_users()
+            login = [{"id": u["id"], "name": u["name"], "role": u["role"]}
+                     for u in app.edge.users() if u["active"]] if enabled and self.user is None else None
             return {"version": __version__, "store_name": app.setting("store_name"),
+                    "users_enabled": enabled, "user": self.user, "login_users": login,
                     "timezone": app.edge.timezone, "currency": "COP", "today": app.edge.local_today(),
                     "local": self.is_local(), "time": formatdate(usegmt=True)}
 

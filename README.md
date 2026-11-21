@@ -23,6 +23,7 @@ se pierde dinero, con explicaciones claras en cada sugerencia.
 | Productos | Alta y edición (precio, costo, mínimo, código de barras, tipo, empaque, pedido mínimo, días de entrega), entradas de mercancía, merma, conteo físico, historial con **anulación** de entradas y mermas equivocadas. |
 | Alertas y compras | Sin stock, bajo mínimo, punto de pedido, capital quieto (sin movimiento), exceso de stock, pedido sugerido con costo estimado y razones. Son borradores: nada se envía a proveedores. |
 | Resumen | Ventas, costo de lo vendido, merma, ganancia bruta y margen del día y de la semana. |
+| Usuarios | Opcional: **PIN por persona** (dueño y cajero). El cajero vende y consulta (sin ver costos ni márgenes); para devolver o anular necesita el PIN del dueño. Cada movimiento guarda quién lo hizo y quién lo autorizó. |
 | Ajustes | Acceso de celulares con clave, importar catálogo desde CSV/Excel con vista previa, exportar productos y movimientos, respaldos diarios automáticos. |
 
 La analítica (demanda EWMA, punto de pedido, stock de seguridad, rotación y margen) está
@@ -71,12 +72,15 @@ venta, la venta queda guardada en el celular y se envía sola al volver.
   rebinding*) y una cabecera propia en la API (contra peticiones de otras webs).
 - Otros dispositivos solo entran si se activa el acceso y presentan la clave (cookie `HttpOnly`).
   La clave solo se muestra y se cambia desde el propio PC.
+- Con usuarios activados, todo dispositivo (también el propio PC) entra con usuario y PIN. PIN con
+  PBKDF2-SHA256 y sal; bloqueo progresivo tras 5 intentos fallidos; sesión con cookie `HttpOnly`
+  de 12 h. PIN olvidado: `python3 -m inventario.usuarios restablecer NOMBRE` en el propio equipo.
 - Interfaz con CSP estricta y sin `innerHTML` con datos; el servidor nunca devuelve trazas.
 
 ## Desarrollo
 
 ```bash
-python3 -m unittest discover -s tests -v     # 62 pruebas, sin red ni dependencias
+python3 -m unittest discover -s tests -v     # 68 pruebas, sin red ni dependencias
 python3 -m inventario.server --puerto 8470   # solo el servidor
 python3 -m inventario.demo                   # demo del protocolo de sincronización
 ```

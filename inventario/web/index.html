@@ -18,13 +18,14 @@
       <span id="nombre-comercio">Inventario</span>
     </div>
     <span id="estado-conexion" class="conexion" role="status" aria-live="polite"></span>
+    <span id="usuario-actual" class="usuario" hidden></span>
   </header>
   <nav class="menu" aria-label="Secciones">
     <a href="#/caja" data-seccion="caja"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18v12H3zM3 10h18M7 15h4"/></svg><span>Caja</span></a>
     <a href="#/productos" data-seccion="productos"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l8 4v10l-8 4-8-4V7zM4 7l8 4 8-4M12 11v10"/></svg><span>Productos</span></a>
-    <a href="#/alertas" data-seccion="alertas"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4l9 16H3zM12 10v4M12 17v.5"/></svg><span>Alertas</span><b id="contador-alertas" class="contador" hidden></b></a>
-    <a href="#/resumen" data-seccion="resumen"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg><span>Resumen</span></a>
-    <a href="#/ajustes" data-seccion="ajustes"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 9a3 3 0 100 6 3 3 0 000-6zM19 12l2-1-1-3-2 .3-1.5-1.5L17 5l-3-1-1 2h-2L10 4 7 5l.5 1.8L6 8.3 4 8 3 11l2 1v0l-2 1 1 3 2-.3 1.5 1.5L7 19l3 1 1-2h2l1 2 3-1-.5-1.8 1.5-1.5 2 .3 1-3z"/></svg><span>Ajustes</span></a>
+    <a href="#/alertas" data-seccion="alertas" data-dueno><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4l9 16H3zM12 10v4M12 17v.5"/></svg><span>Alertas</span><b id="contador-alertas" class="contador" hidden></b></a>
+    <a href="#/resumen" data-seccion="resumen" data-dueno><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg><span>Resumen</span></a>
+    <a href="#/ajustes" data-seccion="ajustes" data-dueno><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 9a3 3 0 100 6 3 3 0 000-6zM19 12l2-1-1-3-2 .3-1.5-1.5L17 5l-3-1-1 2h-2L10 4 7 5l.5 1.8L6 8.3 4 8 3 11l2 1v0l-2 1 1 3 2-.3 1.5 1.5L7 19l3 1 1-2h2l1 2 3-1-.5-1.8 1.5-1.5 2 .3 1-3z"/></svg><span>Ajustes</span></a>
   </nav>
   <main id="vista" tabindex="-1"></main>
   <div id="avisos" class="avisos" aria-live="polite"></div>

@@ -59,6 +59,10 @@ async function api(ruta, { method = "GET", body, raw } = {}) {
   const datos = tipo.includes("application/json") ? await respuesta.json() : await respuesta.text();
   if (!respuesta.ok) {
     const detalle = (datos && datos.detail) || `Error ${respuesta.status}`;
+    if (respuesta.status === 401 && datos && datos.login && ruta !== "/sesion") {
+      estado = { ...(estado || {}), user: null };
+      setTimeout(() => cargarEstado().then(mostrar).catch(() => {}), 0);
+    }
     throw new ErrorApi(respuesta.status, detalle.charAt(0).toUpperCase() + detalle.slice(1), datos);
   }
   return datos;
@@ -170,8 +174,13 @@ const TIPOS = { receive: "Entrada", sale: "Venta", waste: "Merma", void: "Anulac
 
 // Formulario en la página para anular o devolver: el motivo es obligatorio y queda en el historial.
 // (Sin prompt(): en la WebView de Android no es fiable.)
+function esCajero() { return Boolean(estado && estado.user && estado.user.role === "cajero"); }
+
 function formularioMotivo({ titulo, boton, maximo, alConfirmar, alCancelar }) {
   const motivo = h("input", { maxlength: "200", autocomplete: "off", placeholder: "Motivo (obligatorio)" });
+  // Un cajero necesita que el dueño autorice escribiendo su PIN.
+  const pinDueno = esCajero() ? h("input", { type: "password", inputmode: "numeric", autocomplete: "off",
+    maxlength: "8", class: "pin", "aria-label": "PIN del dueño" }) : null;
   const cantidad = maximo ? h("input", { inputmode: "numeric", value: "1", "aria-label": "Unidades a devolver" }) : null;
   const confirmar = h("button", { class: "boton primario", type: "submit" }, boton);
   const form = h("form", { class: "motivo", onsubmit: async (e) => {
@@ -183,13 +192,15 @@ function formularioMotivo({ titulo, boton, maximo, alConfirmar, alCancelar }) {
       try { n = leerEntero(cantidad.value, "Unidades", 1); } catch (error) { aviso(error.message, true); return; }
       if (n > maximo) { aviso(`Como máximo ${maximo}.`, true); return; }
     }
+    if (pinDueno && !/^\d{4,8}$/.test(pinDueno.value)) { aviso("El dueño debe escribir su PIN para autorizar.", true); pinDueno.focus(); return; }
     confirmar.disabled = true;
-    try { await alConfirmar(texto, n); }
+    try { await alConfirmar(texto, n, pinDueno ? pinDueno.value : undefined); }
     catch (error) { aviso(error.message, true); confirmar.disabled = false; }
   } },
     h("p", { class: "pequeno" }, h("strong", {}, titulo)),
     cantidad ? campo(`Unidades (máximo ${maximo})`, cantidad) : null,
     campo("Motivo", motivo),
+    pinDueno ? campo("PIN del dueño (autoriza)", pinDueno) : null,
     h("div", { class: "acciones" }, confirmar, h("button", { class: "boton", type: "button", onclick: alCancelar }, "Cancelar")));
   setTimeout(() => (cantidad || motivo).focus(), 0);
   return form;
@@ -438,9 +449,9 @@ async function vistaProductos() {
     const q = encodeURIComponent(buscador.value.trim());
     const items = await api(`/productos?q=${q}${inactivos.checked ? "&inactivos=1" : ""}`);
     resumen.textContent = plural(items.length, "producto", "productos") + (items.length === 500 ? " (se muestran los primeros 500)" : "");
-    cuerpo.replaceChildren(...items.map((p) => h("tr", {
-      class: "clic", tabindex: "0", onclick: () => { location.hash = `#/producto/${encodeURIComponent(p.sku)}`; },
-      onkeydown: (e) => { if (e.key === "Enter") location.hash = `#/producto/${encodeURIComponent(p.sku)}`; },
+    const abrir = (p) => { location.hash = `#/producto/${encodeURIComponent(p.sku)}`; };
+    cuerpo.replaceChildren(...items.map((p) => h("tr", esCajero() ? {} : {
+      class: "clic", tabindex: "0", onclick: () => abrir(p), onkeydown: (e) => { if (e.key === "Enter") abrir(p); },
     },
       h("td", {}, h("strong", {}, p.name), p.active ? null : h("span", { class: "tenue" }, " (desactivado)"),
         h("div", { class: "tenue pequeno" }, p.sku, p.barcode ? ` · ${p.barcode}` : "")),
@@ -453,7 +464,7 @@ async function vistaProductos() {
   buscador.addEventListener("input", () => { clearTimeout(temporizador); temporizador = setTimeout(() => cargar().catch((e) => aviso(e.message, true)), 200); });
   inactivos.addEventListener("change", () => cargar().catch((e) => aviso(e.message, true)));
   vista.replaceChildren(pagina("Productos",
-    h("div", { class: "acciones" },
+    h("div", { class: "acciones", "data-dueno": "" },
       h("a", { class: "boton", href: "#/ajustes" }, "Importar CSV"),
       h("a", { class: "boton primario", href: "#/nuevo" }, "Nuevo producto")),
     h("div", { class: "tarjeta" },
@@ -553,7 +564,8 @@ function filaMovimiento(m, recargar) {
   const fila = h("tr", { class: m.voided ? "anulado" : null },
     h("td", {}, dia(m.day)),
     h("td", {}, TIPOS[m.kind], m.voided ? h("span", { class: "etiqueta-estado media" }, " anulado") : null,
-      m.note ? h("div", { class: "tenue pequeno" }, m.note) : null),
+      m.note ? h("div", { class: "tenue pequeno" }, m.note) : null,
+      m.user ? h("div", { class: "tenue pequeno" }, `por ${m.user}` + (m.authorized_by && m.authorized_by !== m.user ? ` · autorizó ${m.authorized_by}` : "")) : null),
     h("td", { class: "num" }, (m.stock_delta >= 0 ? "+" : "−") + Math.abs(m.stock_delta)),
     h("td", { class: "num ocultar-movil" }, m.stock_after), acciones);
   if (m.kind === "sale" && m.ticket_id) {
@@ -597,7 +609,8 @@ async function vistaVentas(diaElegido) {
     const [nivel, texto] = estados[t.status];
     return h("section", { class: "tarjeta" },
       h("div", { class: "cabecera", style: "margin-bottom:6px" },
-        h("h2", { style: "margin:0;flex:1" }, `${hora(t.occurred_at)} · ${dinero(t.net_minor)}`),
+        h("h2", { style: "margin:0;flex:1" }, `${hora(t.occurred_at)} · ${dinero(t.net_minor)}`,
+          t.user ? h("span", { class: "tenue pequeno" }, ` · ${t.user}`) : null),
         h("span", { class: "etiqueta-estado " + nivel }, texto)),
       t.net_minor !== t.total_minor ? h("p", { class: "tenue pequeno" }, `Cobrado al vender: ${dinero(t.total_minor)}`) : null,
       h("ul", { class: "lineas" }, t.lines.map((l) => h("li", { class: "linea" },
@@ -608,8 +621,8 @@ async function vistaVentas(diaElegido) {
           zona.replaceChildren(formularioMotivo({
             titulo: `Devolver ${l.name}`, boton: "Registrar devolución", maximo: l.active,
             alCancelar: () => zona.replaceChildren(),
-            alConfirmar: async (motivo, n) => {
-              const r = await api("/devoluciones", { method: "POST", body: { command_id: uuid(), seq: l.seq, quantity: n, reason: motivo, occurred_at: ahora() } });
+            alConfirmar: async (motivo, n, pin) => {
+              const r = await api("/devoluciones", { method: "POST", body: { command_id: uuid(), seq: l.seq, quantity: n, reason: motivo, occurred_at: ahora(), pin_dueno: pin } });
               aviso(`Devolución registrada: ${dinero(-r.revenue_minor)} a devolver al cliente. Stock: ${r.stock}.`);
               await recargar();
             },
@@ -619,8 +632,8 @@ async function vistaVentas(diaElegido) {
         zona.replaceChildren(formularioMotivo({
           titulo: "Anular la venta completa (para ventas registradas por error). Para un cliente que trae productos, use «Devolver».",
           boton: "Anular venta", alCancelar: () => zona.replaceChildren(),
-          alConfirmar: async (motivo) => {
-            const r = await api("/anulaciones/ticket", { method: "POST", body: { command_id: uuid(), ticket_id: t.ticket_id, reason: motivo, occurred_at: ahora() } });
+          alConfirmar: async (motivo, _n, pin) => {
+            const r = await api("/anulaciones/ticket", { method: "POST", body: { command_id: uuid(), ticket_id: t.ticket_id, reason: motivo, occurred_at: ahora(), pin_dueno: pin } });
             aviso(`Venta anulada (${dinero(-r.revenue_minor)}).`);
             actualizarContador();
             await recargar();
@@ -805,6 +818,8 @@ async function vistaAjustes() {
       catch (error) { aviso(error.message, true); }
     } }, campo("Nombre del comercio", nombre), h("button", { class: "boton primario", type: "submit" }, "Guardar"))));
 
+  tarjetas.push(await tarjetaUsuarios());
+
   if (estado.local) {
     const remoto = h("input", { type: "checkbox", id: "remoto", checked: ajustes.remote_enabled });
     remoto.addEventListener("change", async () => {
@@ -891,6 +906,77 @@ async function vistaAjustes() {
   vista.replaceChildren(pagina("Ajustes", null, h("div", { class: "rejilla" }, tarjetas)));
 }
 
+// Usuarios y PIN (solo el dueño, o cualquiera mientras no haya usuarios).
+async function tarjetaUsuarios() {
+  const pinNuevo = (etiqueta) => h("input", { type: "password", inputmode: "numeric", autocomplete: "new-password",
+    maxlength: "8", "aria-label": etiqueta });
+  const leerPin = (a, b) => {
+    if (!/^\d{4,8}$/.test(a.value)) throw new Error("El PIN debe tener de 4 a 8 dígitos.");
+    if (a.value !== b.value) throw new Error("Los dos PIN no coinciden.");
+    return a.value;
+  };
+  if (!estado.users_enabled) {
+    const nombre = h("input", { maxlength: "40", autocomplete: "off", placeholder: "Su nombre" });
+    const pin = pinNuevo("PIN"), pin2 = pinNuevo("Repita el PIN");
+    return h("section", { class: "tarjeta" }, h("h2", {}, "Usuarios y PIN"),
+      h("p", { class: "tenue pequeno" }, "Hoy cualquiera que abra el programa puede cambiar precios, ver costos o anular ventas. Al activar el PIN, cada persona entra con el suyo; los cajeros venden, pero para devolver o anular necesitan el PIN del dueño, y queda registrado quién hizo cada cosa."),
+      h("form", { onsubmit: async (e) => {
+        e.preventDefault();
+        try {
+          const valor = leerPin(pin, pin2);
+          if (!nombre.value.trim()) throw new Error("Escriba su nombre.");
+          await api("/usuarios", { method: "POST", body: { name: nombre.value.trim(), role: "dueno", pin: valor } });
+          aviso("PIN activado. Ya puede crear los usuarios de caja.");
+          await cargarEstado(); await vistaAjustes();
+        } catch (error) { aviso(error.message, true); }
+      } }, h("div", { class: "fila-campos" }, campo("Nombre del dueño", nombre), campo("PIN (4 a 8 dígitos)", pin),
+        campo("Repita el PIN", pin2)),
+        h("button", { class: "boton primario", type: "submit" }, "Proteger con PIN")));
+  }
+  const usuarios = await api("/usuarios");
+  const lista = h("ul", { class: "lineas" }, usuarios.map((u) => {
+    const zona = h("div", {});
+    return h("li", { class: "linea" },
+      h("span", { class: "nombre" }, u.name, h("span", { class: "tenue pequeno" }, u.role === "dueno" ? " · dueño" : " · caja"),
+        u.active ? null : h("span", { class: "etiqueta-estado media" }, " inactivo")),
+      h("span", { class: "acciones", style: "margin:0" },
+        h("button", { class: "boton", onclick: () => {
+          const a = pinNuevo("PIN nuevo"), b = pinNuevo("Repita el PIN");
+          zona.replaceChildren(h("form", { class: "motivo", onsubmit: async (e) => {
+            e.preventDefault();
+            try { await api(`/usuarios/${u.id}`, { method: "PATCH", body: { pin: leerPin(a, b) } }); aviso(`PIN de ${u.name} cambiado.`); zona.replaceChildren(); }
+            catch (error) { aviso(error.message, true); }
+          } }, h("div", { class: "fila-campos" }, campo("PIN nuevo", a), campo("Repita el PIN", b)),
+            h("div", { class: "acciones" }, h("button", { class: "boton primario", type: "submit" }, "Guardar PIN"),
+              h("button", { class: "boton", type: "button", onclick: () => zona.replaceChildren() }, "Cancelar"))));
+          enfocar(a);
+        } }, "Cambiar PIN"),
+        h("button", { class: "boton" + (u.active ? " peligro" : ""), onclick: async () => {
+          try { await api(`/usuarios/${u.id}`, { method: "PATCH", body: { active: !u.active } }); await vistaAjustes(); }
+          catch (error) { aviso(error.message, true); }
+        } }, u.active ? "Desactivar" : "Activar")),
+      h("div", { style: "grid-column:1/-1" }, zona));
+  }));
+  const nombre = h("input", { maxlength: "40", autocomplete: "off" });
+  const rol = h("select", {}, h("option", { value: "cajero" }, "Caja (vende; devolver o anular con PIN del dueño)"),
+    h("option", { value: "dueno" }, "Dueño (todo)"));
+  const pin = pinNuevo("PIN"), pin2 = pinNuevo("Repita el PIN");
+  return h("section", { class: "tarjeta" }, h("h2", {}, "Usuarios y PIN"), lista,
+    h("form", { style: "margin-top:12px", onsubmit: async (e) => {
+      e.preventDefault();
+      try {
+        const valor = leerPin(pin, pin2);
+        await api("/usuarios", { method: "POST", body: { name: nombre.value.trim(), role: rol.value, pin: valor } });
+        aviso("Usuario creado."); await vistaAjustes();
+      } catch (error) { aviso(error.message, true); }
+    } }, h("h2", {}, "Nuevo usuario"),
+      h("div", { class: "fila-campos" }, campo("Nombre", nombre), campo("Tipo", rol)),
+      h("div", { class: "fila-campos" }, campo("PIN (4 a 8 dígitos)", pin), campo("Repita el PIN", pin2)),
+      h("button", { class: "boton primario", type: "submit" }, "Crear usuario")),
+    h("p", { class: "tenue pequeno" }, "Si el dueño olvida su PIN: en este equipo, con el programa cerrado, ejecute ",
+      h("code", {}, "python3 -m inventario.usuarios restablecer NOMBRE"), "."));
+}
+
 async function copiar(texto) {
   try { await navigator.clipboard.writeText(texto); aviso("Copiado."); }
   catch { prompt("Copie el enlace:", texto); }
@@ -912,10 +998,13 @@ const RUTAS = {
 };
 const SECCION = { nuevo: "productos", producto: "productos", ventas: "caja" };
 
+const SOLO_DUENO = new Set(["alertas", "resumen", "ajustes", "producto", "nuevo"]);
+
 async function mostrar() {
   for (const limpiar of alSalir.splice(0)) limpiar();
+  if (estado && estado.users_enabled && !estado.user) { vistaEntrada(); return; }
   const [ruta, ...resto] = (location.hash.replace(/^#\/?/, "") || "caja").split("/");
-  const nombre = RUTAS[ruta] ? ruta : "caja";
+  const nombre = RUTAS[ruta] && !(esCajero() && SOLO_DUENO.has(ruta)) ? ruta : "caja";
   const seccion = SECCION[nombre] || nombre;
   for (const a of document.querySelectorAll(".menu a")) {
     if (a.dataset.seccion === seccion) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
@@ -931,6 +1020,7 @@ async function mostrar() {
 }
 
 async function actualizarContador() {
+  if (esCajero() || (estado && estado.users_enabled && !estado.user)) return;
   try {
     const tablero = await api("/tablero");
     const el = document.getElementById("contador-alertas");
@@ -943,6 +1033,57 @@ async function actualizarContador() {
 async function cargarEstado() {
   estado = await api("/estado");
   document.getElementById("nombre-comercio").textContent = estado.store_name;
+  const sinSesion = estado.users_enabled && !estado.user;
+  document.body.classList.toggle("sin-sesion", sinSesion);
+  document.body.classList.toggle("rol-cajero", esCajero());
+  const usuario = document.getElementById("usuario-actual");
+  usuario.hidden = !estado.user;
+  if (estado.user) {
+    usuario.replaceChildren(h("span", {}, estado.user.name, esCajero() ? h("span", { class: "rol" }, " (caja)") : null),
+      h("button", { class: "boton", onclick: async () => {
+        await api("/sesion/salir", { method: "POST", body: {} }).catch(() => {});
+        await cargarEstado(); location.hash = "#/caja"; await mostrar();
+      } }, "Salir"));
+  }
+}
+
+// ---------------------------------------------------------
+// Entrada con usuario y PIN
+// ---------------------------------------------------------
+
+function vistaEntrada() {
+  const zona = h("div", {});
+  const elegir = () => zona.replaceChildren(
+    h("p", {}, "¿Quién atiende?"),
+    h("div", { class: "usuarios-entrada" }, estado.login_users.map((u) => h("button", { class: "boton", onclick: () => pedirPin(u) },
+      h("strong", {}, u.name), h("span", { class: "tenue pequeno" }, u.role === "dueno" ? "Dueño" : "Caja")))));
+  function pedirPin(u) {
+    const pin = h("input", { type: "password", inputmode: "numeric", autocomplete: "off", maxlength: "8", class: "pin grande",
+      "aria-label": `PIN de ${u.name}` });
+    const entrar = h("button", { class: "boton primario grande", type: "submit" }, "Entrar");
+    const teclas = [..."123456789"].map((d) => h("button", { class: "boton", type: "button", onclick: () => { pin.value += d; } }, d));
+    zona.replaceChildren(h("form", { onsubmit: async (e) => {
+      e.preventDefault();
+      entrar.disabled = true;
+      try {
+        await api("/sesion", { method: "POST", body: { user_id: u.id, pin: pin.value } });
+        await cargarEstado();
+        location.hash = "#/caja";
+        await mostrar();
+      } catch (error) { aviso(error.message, true); pin.value = ""; entrar.disabled = false; enfocar(pin); }
+    } },
+      h("p", {}, h("strong", {}, u.name), " · escriba su PIN"),
+      pin,
+      h("div", { class: "teclado-pin" }, teclas,
+        h("button", { class: "boton", type: "button", onclick: elegir, "aria-label": "Volver" }, "←"),
+        h("button", { class: "boton", type: "button", onclick: () => { pin.value += "0"; } }, "0"),
+        h("button", { class: "boton", type: "button", onclick: () => { pin.value = pin.value.slice(0, -1); }, "aria-label": "Borrar" }, "⌫")),
+      entrar));
+    enfocar(pin);
+  }
+  elegir();
+  vista.replaceChildren(h("div", { class: "pagina entrada" }, h("h1", {}, estado.store_name), h("div", { class: "tarjeta" }, zona)));
+  document.title = "Entrar · Inventario";
 }
 
 async function iniciar() {

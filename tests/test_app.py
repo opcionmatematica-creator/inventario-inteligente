@@ -429,3 +429,58 @@ class CompensationTests(unittest.TestCase):
 
 def canonical_text(value) -> str:
     return json.dumps(value, ensure_ascii=False)
+
+
+class UserTests(unittest.TestCase):
+    def setUp(self):
+        self.folder = TemporaryDirectory()
+        self.addCleanup(self.folder.cleanup)
+        self.edge = Edge(Path(self.folder.name) / "edge.sqlite3")
+        self.addCleanup(lambda: self.edge.close())
+
+    def test_pin_rules_hash_and_last_owner(self):
+        self.assertFalse(self.edge.has_users())
+        with self.assertRaisesRegex(ValueError, "primero cree el usuario dueño"):
+            self.edge.add_user("Caja 1", "cajero", "4826")
+        for bad in ("12", "abcd", "1111", "1234", "9876", "123456789"):
+            with self.assertRaises(ValueError, msg=bad):
+                self.edge.add_user("Ana", "dueno", bad)
+        ana = self.edge.add_user("Ana", "dueno", "4826")
+        self.assertTrue(self.edge.has_users())
+        raw = self.edge.db.execute("SELECT pin_hash FROM users").fetchone()[0]
+        self.assertNotIn(b"4826", raw)  # nunca en claro
+        self.assertEqual(self.edge.check_pin(ana["id"], "4826")["role"], "dueno")
+        self.assertIsNone(self.edge.check_pin(ana["id"], "4827"))
+        self.assertIsNone(self.edge.check_pin(ana["id"], None))
+        with self.assertRaisesRegex(ValueError, "ya existe"):
+            self.edge.add_user("ana", "cajero", "5937")
+        luis = self.edge.add_user("Luis", "cajero", "5937")
+        self.assertIsNone(self.edge.owner_by_pin("5937"))  # un cajero no autoriza
+        self.assertEqual(self.edge.owner_by_pin("4826")["name"], "Ana")
+        with self.assertRaisesRegex(ValueError, "al menos un dueño"):
+            self.edge.update_user(ana["id"], active=False)
+        self.edge.update_user(luis["id"], active=False)
+        self.assertIsNone(self.edge.check_pin(luis["id"], "5937"))
+        self.edge.update_user(ana["id"], pin="7391")
+        self.assertIsNone(self.edge.check_pin(ana["id"], "4826"))
+
+    def test_movements_record_who_and_who_authorized(self):
+        ana = self.edge.add_user("Ana", "dueno", "4826")
+        luis = self.edge.add_user("Luis", "cajero", "5937")
+        self.edge.add_product("A", price=1000, cost=600)
+        self.edge.actor = (ana["id"], None)
+        self.edge.move("r", "A", "receive", 5, TIME)
+        self.edge.actor = (luis["id"], None)
+        self.edge.sell("t1", [{"sku": "A", "quantity": 2}], TIME)
+        seq = self.edge.db.execute("SELECT seq FROM events WHERE command_id='t1#1'").fetchone()[0]
+        self.edge.actor = (luis["id"], ana["id"])
+        self.edge.return_sale("d", seq, 1, TIME, "roto")
+        self.edge.actor = (None, None)
+        history = self.edge.movements(sku="A")
+        self.assertEqual([(m["kind"], m["user"], m["authorized_by"]) for m in history],
+                         [("return", "Luis", "Ana"), ("sale", "Luis", None), ("receive", "Ana", None)])
+        self.assertEqual(self.edge.tickets()[0]["user"], "Luis")
+        from inventario.sync import Gateway
+        batch = json.dumps(Gateway(self.edge).prepare())
+        for secret in ("Luis", "Ana", "user_id", "authorized_by"):
+            self.assertNotIn(secret, batch)  # no viaja en la sincronización

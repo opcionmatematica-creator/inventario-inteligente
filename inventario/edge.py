@@ -2,7 +2,11 @@
 
 from contextlib import contextmanager
 from datetime import date, datetime
+import hashlib
+import hmac
 import json
+import re
+import secrets
 import sqlite3
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -30,6 +34,10 @@ PRODUCT_MIGRATIONS = (
 EVENT_MIGRATIONS = (("sku", "TEXT"), ("kind", "TEXT"), ("day", "TEXT"), ("note", "TEXT"), ("quantity", "INTEGER"),
                     ("ref_seq", "INTEGER"), ("sold_delta", "INTEGER"))
 TICKET_MIGRATIONS = (("day", "TEXT"),)
+# Quién hizo cada movimiento y quién lo autorizó (dueño). Solo local: no viaja en la sincronización.
+EVENT_MIGRATIONS += (("user_id", "INTEGER"), ("authorized_by", "INTEGER"))
+ROLES = ("dueno", "cajero")
+PIN_ITERATIONS = 200_000
 # Movimientos compensatorios: nunca se borra la historia (ver docs/arquitectura.md).
 COMPENSATIONS = ("void", "return")
 # Métrica de unidades que mueve cada tipo, como en las filas de sincronización.
@@ -128,9 +136,17 @@ class Edge:
                 ack_seq INTEGER NOT NULL DEFAULT 0, pending TEXT);
             CREATE TABLE IF NOT EXISTS tickets(
                 ticket_id TEXT PRIMARY KEY, request TEXT NOT NULL, receipt TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS users(
+                id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+                role TEXT NOT NULL CHECK(role IN ('dueno','cajero')),
+                pin_salt BLOB NOT NULL, pin_hash BLOB NOT NULL,
+                active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL);
             INSERT OR IGNORE INTO sync_state(singleton) VALUES(1);
         """)
         self._migrate()
+        # (usuario que hace el movimiento, dueño que lo autoriza). El servidor lo fija bajo su
+        # cerrojo antes de cada operación; None sin usuarios configurados.
+        self.actor: tuple[int | None, int | None] = (None, None)
         with transaction(self.db):
             self.db.execute("INSERT OR IGNORE INTO metadata VALUES('stream_id', ?)", (str(uuid4()),))
             self.db.execute("INSERT OR IGNORE INTO metadata VALUES('timezone', ?)", (timezone,))
@@ -295,9 +311,9 @@ class Edge:
                    "gross_margin_minor": payload["revenue_minor"] - payload["cogs_minor"]}
         self.db.execute("UPDATE products SET stock=? WHERE sku=?", (stock, sku))
         self.db.execute("INSERT INTO events(command_id, request, payload, receipt, sku, kind, day, note, quantity,"
-                        " sold_delta) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                        " sold_delta, user_id, authorized_by) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                         (command_id, request, canonical(payload), canonical(receipt), sku, kind, day, note, quantity,
-                         _sold_delta(payload)))
+                         _sold_delta(payload), *self.actor))
         return receipt
 
     # ---------------------------------------------------------
@@ -345,9 +361,9 @@ class Edge:
                    "revenue_minor": money["revenue_minor"]}
         self.db.execute("UPDATE products SET stock=? WHERE sku=?", (stock, original["sku"]))
         self.db.execute("INSERT INTO events(command_id, request, payload, receipt, sku, kind, day, note, quantity,"
-                        " ref_seq, sold_delta) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                        " ref_seq, sold_delta, user_id, authorized_by) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                         (command_id, request, canonical(payload), canonical(receipt), original["sku"], kind, day,
-                         reason, payload["quantity"], original["seq"], _sold_delta(payload)))
+                         reason, payload["quantity"], original["seq"], _sold_delta(payload), *self.actor))
         return receipt
 
     def _void_one(self, command_id: str, seq: int, occurred_at: str, reason: str, request: str) -> dict:
@@ -464,7 +480,10 @@ class Edge:
                 lines.append({"seq": event["seq"], "sku": event["sku"], "name": name[0] if name else event["sku"],
                               "quantity": event["quantity"], "unit_price_minor": unit,
                               "returned": status["returned"], "voided": status["voided"], "active": active})
+            seller = self.db.execute("SELECT u.name FROM events e JOIN users u ON u.id = e.user_id WHERE e.seq=?",
+                                     (lines[0]["seq"],)).fetchone() if lines else None
             out.append({"ticket_id": row["ticket_id"], "occurred_at": receipt["occurred_at"], "day": receipt["day"],
+                        "user": seller[0] if seller else None,
                         "total_minor": receipt["total_minor"], "net_minor": net, "lines": lines,
                         "status": "anulado" if all(l["voided"] for l in lines)
                         else "con_devoluciones" if any(l["returned"] or l["voided"] for l in lines) else "vigente"})
@@ -566,6 +585,8 @@ class Edge:
 
     def movements(self, *, sku: str | None = None, limit: int = 100) -> list[dict]:
         sql = ("SELECT e.seq, e.command_id, e.sku, e.kind, e.day, e.note, e.payload, e.ref_seq, p.name,"
+               " (SELECT name FROM users WHERE id = e.user_id) AS user_name,"
+               " (SELECT name FROM users WHERE id = e.authorized_by) AS authorized_name,"
                " EXISTS (SELECT 1 FROM events v WHERE v.ref_seq = e.seq AND v.kind = 'void') AS voided"
                " FROM events e LEFT JOIN products p ON p.sku = e.sku")
         args: list = []
@@ -583,6 +604,7 @@ class Edge:
                         "cogs_minor": item["cogs_minor"], "waste_minor": item["waste_minor"],
                         "stock_after": item["stock_after"], "stock_delta": stock_delta(item),
                         "ref_seq": row["ref_seq"], "voided": bool(row["voided"]),
+                        "user": row["user_name"], "authorized_by": row["authorized_name"],
                         "ticket_id": row["command_id"].rsplit("#", 1)[0] if item["kind"] == "sale" and "#" in row["command_id"] else None})
         return out
 
@@ -622,6 +644,93 @@ class Edge:
             row = self.db.execute("SELECT min(day) FROM events WHERE sku=?", (sku,)).fetchone()
             return {sku: row[0]} if row[0] else {}
         return {row[0]: row[1] for row in self.db.execute("SELECT sku, min(day) FROM events GROUP BY sku")}
+
+    # ---------------------------------------------------------
+    # Usuarios y PIN
+    # ---------------------------------------------------------
+
+    @staticmethod
+    def _pin_hash(pin: str, salt: bytes) -> bytes:
+        return hashlib.pbkdf2_hmac("sha256", pin.encode(), salt, PIN_ITERATIONS)
+
+    @staticmethod
+    def _check_pin_format(pin) -> str:
+        if not isinstance(pin, str) or not re.fullmatch(r"\d{4,8}", pin):
+            raise ValueError("el PIN debe tener de 4 a 8 dígitos")
+        if len(set(pin)) == 1 or pin in "0123456789" or pin in "9876543210":
+            raise ValueError("ese PIN es demasiado fácil de adivinar")
+        return pin
+
+    def has_users(self) -> bool:
+        return self.db.execute("SELECT 1 FROM users WHERE active=1 LIMIT 1").fetchone() is not None
+
+    def users(self) -> list[dict]:
+        return [dict(row) for row in self.db.execute(
+            "SELECT id, name, role, active, created_at FROM users ORDER BY active DESC, role, name COLLATE NOCASE")]
+
+    def user(self, user_id: int) -> dict | None:
+        row = self.db.execute("SELECT id, name, role, active FROM users WHERE id=?", (user_id,)).fetchone()
+        return dict(row) if row else None
+
+    def add_user(self, name: str, role: str, pin: str) -> dict:
+        name = _text("nombre", name, maximum=40, required=True)
+        if role not in ROLES:
+            raise ValueError("rol desconocido")
+        if role == "cajero" and not self.db.execute(
+                "SELECT 1 FROM users WHERE role='dueno' AND active=1").fetchone():
+            raise ValueError("primero cree el usuario dueño")
+        salt = secrets.token_bytes(16)
+        try:
+            cursor = self.db.execute(
+                "INSERT INTO users(name, role, pin_salt, pin_hash, created_at) VALUES(?,?,?,?,?)",
+                (name, role, salt, self._pin_hash(self._check_pin_format(pin), salt),
+                 datetime.now(ZoneInfo(self.timezone)).isoformat(timespec="seconds")))
+        except sqlite3.IntegrityError as exc:
+            raise ValueError("ya existe un usuario con ese nombre") from exc
+        return self.user(cursor.lastrowid)
+
+    def update_user(self, user_id: int, *, pin: str | None = None, active: bool | None = None,
+                    name: str | None = None) -> dict:
+        current = self.user(user_id)
+        if current is None:
+            raise ValueError("usuario desconocido")
+        with transaction(self.db):
+            if name is not None:
+                try:
+                    self.db.execute("UPDATE users SET name=? WHERE id=?",
+                                    (_text("nombre", name, maximum=40, required=True), user_id))
+                except sqlite3.IntegrityError as exc:
+                    raise ValueError("ya existe un usuario con ese nombre") from exc
+            if pin is not None:
+                salt = secrets.token_bytes(16)
+                self.db.execute("UPDATE users SET pin_salt=?, pin_hash=? WHERE id=?",
+                                (salt, self._pin_hash(self._check_pin_format(pin), salt), user_id))
+            if active is not None:
+                if not isinstance(active, bool):
+                    raise ValueError("activo debe ser verdadero o falso")
+                if not active and current["role"] == "dueno" and self.db.execute(
+                        "SELECT count(*) FROM users WHERE role='dueno' AND active=1").fetchone()[0] <= 1:
+                    raise ValueError("debe quedar al menos un dueño activo")
+                self.db.execute("UPDATE users SET active=? WHERE id=?", (int(active), user_id))
+        return self.user(user_id)
+
+    def check_pin(self, user_id: int, pin) -> dict | None:
+        """Usuario activo si el PIN coincide (comparación en tiempo constante)."""
+        row = self.db.execute("SELECT id, name, role, pin_salt, pin_hash FROM users WHERE id=? AND active=1",
+                              (user_id,)).fetchone()
+        if row is None or not isinstance(pin, str) or len(pin) > 16:
+            return None
+        if hmac.compare_digest(self._pin_hash(pin, row["pin_salt"]), row["pin_hash"]):
+            return {"id": row["id"], "name": row["name"], "role": row["role"]}
+        return None
+
+    def owner_by_pin(self, pin) -> dict | None:
+        """Dueño activo cuyo PIN coincide (para autorizar una devolución o anulación de un cajero)."""
+        for row in self.db.execute("SELECT id FROM users WHERE role='dueno' AND active=1").fetchall():
+            owner = self.check_pin(row[0], pin)
+            if owner:
+                return owner
+        return None
 
     # ---------------------------------------------------------
     # Informes

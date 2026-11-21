@@ -165,6 +165,17 @@ class ServerTests(ServerCase):
         self.assertEqual(self.call("GET", "/api/v1/exportar/productos.csv", headers={"X-Inventario": None})[0], 200)
         self.assertEqual(self.call("GET", "/api/v1/exportar/productos.csv", host="malicioso.example")[0], 403)
 
+    def test_unread_body_does_not_break_keep_alive(self):
+        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        self.addCleanup(connection.close)
+        headers = {"Host": f"127.0.0.1:{self.port}", "X-Inventario": "1", "Content-Type": "application/json"}
+        connection.request("POST", "/api/v1/sesion/salir", body=b'{"x": 1}', headers=headers)
+        self.assertEqual(connection.getresponse().read() and 200, 200)
+        connection.request("GET", "/api/v1/estado", headers=headers)  # misma conexión
+        response = connection.getresponse()
+        self.assertEqual(response.status, 200)
+        self.assertIn(b"version", response.read())
+
     def test_static_files_and_security_headers(self):
         status, body, response = self.call("GET", "/")
         self.assertEqual(status, 200)
@@ -201,6 +212,81 @@ class ServerTests(ServerCase):
         status, changed, _ = self.call("PATCH", "/api/v1/ajustes", {"store_name": "Tienda Don José"})
         self.assertEqual(changed["store_name"], "Tienda Don José")
         self.assertEqual(self.call("PATCH", "/api/v1/ajustes", {"store_name": ""})[0], 422)
+
+
+class UserAccessTests(ServerCase):
+    def login(self, user_id, pin):
+        status, body, response = self.call("POST", "/api/v1/sesion", {"user_id": user_id, "pin": pin})
+        cookie = (response.getheader("Set-Cookie") or "").split(";")[0]
+        return status, body, {"Cookie": cookie}
+
+    def test_owner_and_cashier_permissions(self):
+        self.call("POST", "/api/v1/productos", {"sku": "A", "price": 1000, "cost": 600, "initial_stock": 10})
+        self.assertFalse(self.call("GET", "/api/v1/estado")[1]["users_enabled"])
+        self.assertEqual(self.call("POST", "/api/v1/usuarios", {"name": "Caja", "role": "cajero", "pin": "5937"})[0], 422)
+        status, owner, response = self.call("POST", "/api/v1/usuarios", {"name": "Ana", "role": "dueno", "pin": "4826"})
+        self.assertEqual(status, 201)
+        owner_cookie = {"Cookie": response.getheader("Set-Cookie").split(";")[0]}  # queda con la sesión abierta
+        self.assertIn("HttpOnly", response.getheader("Set-Cookie"))
+        # Desde ahora todo pide sesión, también en el propio equipo.
+        self.assertEqual(self.call("GET", "/api/v1/tablero")[0], 401)
+        state = self.call("GET", "/api/v1/estado")[1]
+        self.assertEqual((state["users_enabled"], state["user"], [u["name"] for u in state["login_users"]]),
+                         (True, None, ["Ana"]))
+        self.assertEqual(self.call("GET", "/api/v1/tablero", headers=owner_cookie)[0], 200)
+        status, cashier, _ = self.call("POST", "/api/v1/usuarios", {"name": "Luis", "role": "cajero", "pin": "5937"},
+                                       headers=owner_cookie)
+        self.assertEqual(status, 201)
+        self.assertEqual(self.login(cashier["id"], "0000")[0], 401)
+        status, _, cashier_cookie = self.login(cashier["id"], "5937")
+        self.assertEqual(status, 200)
+        # El cajero vende y busca, pero no ve costos ni entra a lo del dueño.
+        products = self.call("GET", "/api/v1/productos", headers=cashier_cookie)[1]
+        self.assertNotIn("cost", products[0])
+        self.assertNotIn("cost", self.call("GET", "/api/v1/buscar?codigo=A", headers=cashier_cookie)[1])
+        for method, path in (("GET", "/api/v1/tablero"), ("GET", "/api/v1/productos/A"), ("GET", "/api/v1/ajustes"),
+                             ("PATCH", "/api/v1/productos/A"), ("GET", "/api/v1/usuarios"),
+                             ("GET", "/api/v1/exportar/productos.csv")):
+            self.assertEqual(self.call(method, path, {} if method == "PATCH" else None, headers=cashier_cookie)[0],
+                             403, path)
+        status, sale, _ = self.call("POST", "/api/v1/ventas", {"ticket_id": "t1", "lines": [{"sku": "A", "quantity": 3}]},
+                                    headers=cashier_cookie)
+        self.assertEqual(status, 200)
+        line = self.call("GET", "/api/v1/ventas", headers=cashier_cookie)[1][0]
+        self.assertEqual(line["user"], "Luis")
+        body = {"command_id": "d1", "seq": line["lines"][0]["seq"], "quantity": 1, "reason": "roto"}
+        status, error, _ = self.call("POST", "/api/v1/devoluciones", body, headers=cashier_cookie)
+        self.assertEqual((status, error.get("owner_pin")), (403, True))
+        self.assertEqual(self.call("POST", "/api/v1/devoluciones", {**body, "pin_dueno": "5937"},
+                                   headers=cashier_cookie)[0], 403)  # el PIN del cajero no autoriza
+        status, receipt, _ = self.call("POST", "/api/v1/devoluciones", {**body, "pin_dueno": "4826"},
+                                       headers=cashier_cookie)
+        self.assertEqual((status, receipt["stock"]), (200, 8))
+        history = self.call("GET", "/api/v1/productos/A", headers=owner_cookie)[1]["movements"]
+        self.assertEqual((history[0]["user"], history[0]["authorized_by"]), ("Luis", "Ana"))
+        # Desactivar al cajero cierra su sesión; salir borra la cookie.
+        self.call("PATCH", f"/api/v1/usuarios/{cashier['id']}", {"active": False}, headers=owner_cookie)
+        self.assertEqual(self.call("GET", "/api/v1/ventas", headers=cashier_cookie)[0], 401)
+        status, _, response = self.call("POST", "/api/v1/sesion/salir", {}, headers=owner_cookie)
+        self.assertIn("Max-Age=0", response.getheader("Set-Cookie"))
+        self.assertEqual(self.call("GET", "/api/v1/tablero", headers=owner_cookie)[0], 401)
+
+    def test_pin_attempts_are_throttled(self):
+        status, owner, _ = self.call("POST", "/api/v1/usuarios", {"name": "Ana", "role": "dueno", "pin": "4826"})
+        for _ in range(5):
+            self.assertEqual(self.login(owner["id"], "1357")[0], 401)
+        status, error, _ = self.login(owner["id"], "4826")  # incluso el PIN bueno espera
+        self.assertEqual(status, 429)
+        self.assertIn("espere", error["detail"])
+
+    def test_recovery_command_resets_owner_pin(self):
+        from unittest import mock
+        from inventario import usuarios
+        status, owner, _ = self.call("POST", "/api/v1/usuarios", {"name": "Ana", "role": "dueno", "pin": "4826"})
+        with mock.patch.object(usuarios, "getpass", side_effect=["7391", "7391"]), \
+                mock.patch("builtins.print"):
+            usuarios.main(["restablecer", "ana", "--datos", self.folder.name])
+        self.assertEqual(self.login(owner["id"], "7391")[0], 200)
 
 
 @unittest.skipUnless(lan_addresses(), "sin dirección de red local para simular otro dispositivo")

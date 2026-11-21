@@ -129,7 +129,20 @@ Ejecutado en Linux, Python 3.12.3:
 - Interfaz con Playwright (15 pasos): devolver una línea, anular el ticket, resumen del día neto 0,
   anular la entrada de 2424 desde la ficha, motivo visible en el historial, sin desbordes a 390 px.
 
-Pendiente antes de vender a comercios: probar en Windows real;
-usuarios con PIN y permisos (cajero/propietario); escaneo con cámara; instalador sin Python
+### Usuarios con PIN (21 de noviembre de 2026)
+
+- 68 pruebas aprobadas. Nuevas: formato y hash del PIN (nunca en claro), último dueño activo,
+  auditoría de quién hizo y autorizó (sin viajar en la sincronización), activación con sesión
+  abierta, permisos del cajero por la API (sin costos, 403 en lo del dueño), autorización con PIN del
+  dueño (el del cajero no sirve), cierre de sesión, desactivar usuario, bloqueo tras 5 intentos y el
+  comando de recuperación; regresión del cuerpo no leído en conexiones persistentes (fallo real
+  encontrado al probar «Salir»: la petición siguiente daba 501).
+- Navegador (16 pasos): activar PIN, crear cajero, entrada con teclado en pantalla, PIN equivocado,
+  menú y rutas del cajero, devolución con PIN del dueño, historial «por Luis · autorizó Ana», 390 px
+  sin desbordes con sesión para ambos roles. Las pruebas sin usuarios (20 + 15 pasos) siguen pasando.
+- Celular (cable USB): pantalla «¿Quién atiende?», PIN con el teclado táctil, menú del cajero y sesión
+  conservada al reabrir la app. Se corrigió un desbordamiento de la cabecera con el usuario.
+
+Pendiente antes de vender a comercios: probar en Windows real; escaneo con cámara; instalador sin Python
 previo; integración con facturación electrónica DIAN o con el POS autorizado del comercio;
 licencias/planes en el software; piloto con comercios reales.

@@ -19,7 +19,8 @@ se pierde dinero, con explicaciones claras en cada sugerencia.
 | Área | Funciones |
 |---|---|
 | Caja | Lector de código de barras USB (escanear y listo), búsqueda por nombre, más vendidos, ticket de varias líneas, cobro con F2, ventas sin conexión que se reenvían solas sin duplicarse, aviso si un precio cambió antes de cobrar. |
-| Productos | Alta y edición (precio, costo, mínimo, código de barras, tipo, empaque, pedido mínimo, días de entrega), entradas de mercancía, merma, conteo físico, historial. |
+| Ventas | Historial de tickets por día; **devoluciones** parciales (repone stock y resta lo cobrado) y **anulación** de ventas registradas por error, con motivo obligatorio. Nada se borra: todo queda en el historial. |
+| Productos | Alta y edición (precio, costo, mínimo, código de barras, tipo, empaque, pedido mínimo, días de entrega), entradas de mercancía, merma, conteo físico, historial con **anulación** de entradas y mermas equivocadas. |
 | Alertas y compras | Sin stock, bajo mínimo, punto de pedido, capital quieto (sin movimiento), exceso de stock, pedido sugerido con costo estimado y razones. Son borradores: nada se envía a proveedores. |
 | Resumen | Ventas, costo de lo vendido, merma, ganancia bruta y margen del día y de la semana. |
 | Ajustes | Acceso de celulares con clave, importar catálogo desde CSV/Excel con vista previa, exportar productos y movimientos, respaldos diarios automáticos. |
@@ -75,7 +76,7 @@ venta, la venta queda guardada en el celular y se envía sola al volver.
 ## Desarrollo
 
 ```bash
-python3 -m unittest discover -s tests -v     # 54 pruebas, sin red ni dependencias
+python3 -m unittest discover -s tests -v     # 62 pruebas, sin red ni dependencias
 python3 -m inventario.server --puerto 8470   # solo el servidor
 python3 -m inventario.demo                   # demo del protocolo de sincronización
 ```

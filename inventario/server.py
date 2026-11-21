@@ -345,6 +345,25 @@ def make_handler(app: App):
                     if not product:
                         raise ApiError(404, "no hay ningún producto con ese código")
                     return 200, product, {}
+                if name == "ventas" and method == "GET":
+                    day = q.get("dia") or None
+                    if day:
+                        date.fromisoformat(day)
+                    return 200, edge.tickets(day=day, limit=min(200, int(q.get("limite", "50")))), {}
+                if name == "anulaciones" and method == "POST":
+                    data = _body_json(self)
+                    when = app.occurred_at(data.get("occurred_at"))
+                    if rest == ["ticket"]:
+                        _require(data, "command_id", "ticket_id", "reason")
+                        return 200, edge.void_ticket(data["command_id"], data["ticket_id"], when, data["reason"]), {}
+                    if not rest:
+                        _require(data, "command_id", "seq", "reason")
+                        return 200, edge.void(data["command_id"], data["seq"], when, data["reason"]), {}
+                if name == "devoluciones" and method == "POST":
+                    data = _body_json(self)
+                    _require(data, "command_id", "seq", "quantity", "reason")
+                    return 200, edge.return_sale(data["command_id"], data["seq"], data["quantity"],
+                                                 app.occurred_at(data.get("occurred_at")), data["reason"]), {}
                 if name == "ventas" and method == "POST":
                     data = _body_json(self)
                     _require(data, "ticket_id", "lines")

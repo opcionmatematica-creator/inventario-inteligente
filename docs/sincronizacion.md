@@ -53,6 +53,27 @@ vinculados a un comercio se consideran **seudonimizados**, no anónimos de forma
 irreversible. Identidad del tenant y sucursal se resuelve por autenticación del
 dispositivo; `stream_id` no es una credencial.
 
+### Anulaciones y devoluciones (lote v2)
+
+Implementado el 21 de noviembre de 2026. Las filas diarias **no cambian**: siguen llevando totales
+brutos sin negativos (entradas, ventas, mermas). Una anulación o una devolución es un movimiento
+compensatorio en el Core (nunca se borra ni se edita un evento) y viaja en la lista `adjustments`;
+un lote que la contiene usa `schema_version: 2`. Sin compensaciones el lote sigue siendo v1.
+
+| Campo | Contenido |
+|---|---|
+| `product_ref`, `day` | Seudónimo HMAC y día al que se aplica: el del movimiento original en una anulación (el error «no ocurrió»), el de la devolución en una devolución. |
+| `kind` | `void` (anulación) o `return` (devolución de un cliente). |
+| `metric`, `units` | Métrica de unidades afectada (`received_units`, `sold_units`, `waste_units`) y delta **con signo**. |
+| `revenue_minor`, `cogs_minor`, `waste_minor` | Deltas con signo (una devolución resta ingreso y costo al precio cobrado). |
+| `seq`, `stock_after` | Secuencia del evento y stock resultante. |
+
+El receptor suma cada ajuste a la fila `(stream, product_ref, day)` (la crea en cero si no existe)
+y cuenta el evento. La idempotencia del lote no cambia: el mismo `batch_id` devuelve el mismo ACK.
+`event_count` = eventos de las filas + ajustes; las secuencias de filas y ajustes no se repiten.
+No viajan SKU, `command_id`, `ref_seq` ni el motivo escrito por el usuario. JSON Schema actualizado
+en `schemas/sync-batch.schema.json` (v1 sin `adjustments`, v2 con ellos).
+
 ### Extensión para aprendizaje completo
 
 Este v1 ejecutable lleva movimientos y costos, pero **no contiene por sí solo

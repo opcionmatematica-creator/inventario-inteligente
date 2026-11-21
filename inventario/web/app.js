@@ -166,7 +166,36 @@ const memoria = {
 };
 
 const CATEGORIAS = { tienda: "Tienda / abarrotes", perecedero: "Perecedero", ferreteria: "Ferretería / repuestos" };
-const TIPOS = { receive: "Entrada", sale: "Venta", waste: "Merma" };
+const TIPOS = { receive: "Entrada", sale: "Venta", waste: "Merma", void: "Anulación", return: "Devolución" };
+
+// Formulario en la página para anular o devolver: el motivo es obligatorio y queda en el historial.
+// (Sin prompt(): en la WebView de Android no es fiable.)
+function formularioMotivo({ titulo, boton, maximo, alConfirmar, alCancelar }) {
+  const motivo = h("input", { maxlength: "200", autocomplete: "off", placeholder: "Motivo (obligatorio)" });
+  const cantidad = maximo ? h("input", { inputmode: "numeric", value: "1", "aria-label": "Unidades a devolver" }) : null;
+  const confirmar = h("button", { class: "boton primario", type: "submit" }, boton);
+  const form = h("form", { class: "motivo", onsubmit: async (e) => {
+    e.preventDefault();
+    const texto = motivo.value.trim();
+    if (texto.length < 3) { aviso("Escriba el motivo (al menos 3 letras).", true); motivo.focus(); return; }
+    let n = null;
+    if (cantidad) {
+      try { n = leerEntero(cantidad.value, "Unidades", 1); } catch (error) { aviso(error.message, true); return; }
+      if (n > maximo) { aviso(`Como máximo ${maximo}.`, true); return; }
+    }
+    confirmar.disabled = true;
+    try { await alConfirmar(texto, n); }
+    catch (error) { aviso(error.message, true); confirmar.disabled = false; }
+  } },
+    h("p", { class: "pequeno" }, h("strong", {}, titulo)),
+    cantidad ? campo(`Unidades (máximo ${maximo})`, cantidad) : null,
+    campo("Motivo", motivo),
+    h("div", { class: "acciones" }, confirmar, h("button", { class: "boton", type: "button", onclick: alCancelar }, "Cancelar")));
+  setTimeout(() => (cantidad || motivo).focus(), 0);
+  return form;
+}
+
+function hora(iso) { return iso.slice(11, 16); }
 
 function campo(etiqueta, control, ayuda) {
   const id = control.id || (control.id = "c-" + Math.random().toString(36).slice(2, 9));
@@ -363,6 +392,7 @@ function vistaCaja() {
     } finally {
       cobrando = false;
       pintarTicket();
+      if (!buscador.value.trim()) masVendidos();  // stock actualizado en los botones
       enfocar(buscador);
     }
   }
@@ -374,6 +404,8 @@ function vistaCaja() {
   vista.replaceChildren(h("div", { class: "pagina" },
     h("div", { class: "caja" },
       h("section", { "aria-label": "Buscar productos" }, buscador,
+        // Arriba y visible también en el móvil (el ticket queda debajo de los productos).
+        h("div", { class: "fila-caja" }, h("a", { class: "boton", href: "#/ventas" }, "Ventas de hoy · devolver o anular")),
         h("p", { class: "tenue pequeno solo-teclado" }, "Con un lector de código de barras basta con escanear. Enter añade el producto; Enter con la búsqueda vacía o F2 cobra."),
         lista),
       h("aside", { class: "tarjeta ticket", "aria-label": "Ticket" },
@@ -516,6 +548,96 @@ function formularioProducto(producto, alGuardar) {
   return form;
 }
 
+function filaMovimiento(m, recargar) {
+  const acciones = h("td", { class: "acciones-fila" });
+  const fila = h("tr", { class: m.voided ? "anulado" : null },
+    h("td", {}, dia(m.day)),
+    h("td", {}, TIPOS[m.kind], m.voided ? h("span", { class: "etiqueta-estado media" }, " anulado") : null,
+      m.note ? h("div", { class: "tenue pequeno" }, m.note) : null),
+    h("td", { class: "num" }, (m.stock_delta >= 0 ? "+" : "−") + Math.abs(m.stock_delta)),
+    h("td", { class: "num ocultar-movil" }, m.stock_after), acciones);
+  if (m.kind === "sale" && m.ticket_id) {
+    acciones.append(h("a", { class: "pequeno", href: `#/ventas/${m.day}` }, "Ver venta"));
+  } else if ((m.kind === "receive" || m.kind === "waste" || m.kind === "return") && !m.voided) {
+    acciones.append(h("button", { class: "boton", onclick: () => {
+      const celda = h("td", { colspan: "5" });
+      const extra = h("tr", {}, celda);
+      celda.append(formularioMotivo({
+        titulo: `Anular ${TIPOS[m.kind].toLowerCase()} de ${Math.abs(m.stock_delta)} (${dia(m.day)}). Queda en el historial.`,
+        boton: "Anular", alCancelar: () => extra.remove(),
+        alConfirmar: async (motivo) => {
+          const r = await api("/anulaciones", { method: "POST", body: { command_id: uuid(), seq: m.seq, reason: motivo, occurred_at: ahora() } });
+          aviso(`Anulado. Stock: ${r.stock}.`);
+          actualizarContador();
+          await recargar();
+        },
+      }));
+      fila.after(extra);
+    } }, "Anular"));
+  }
+  return fila;
+}
+
+// ---------------------------------------------------------
+// Ventas: historial de tickets, devoluciones y anulaciones
+// ---------------------------------------------------------
+
+async function vistaVentas(diaElegido) {
+  const hoy = estado.today;
+  const elegido = diaElegido || hoy;
+  const tickets = await api(`/ventas?dia=${encodeURIComponent(elegido)}&limite=200`);
+  const selector = h("input", { type: "date", value: elegido, max: hoy, "aria-label": "Día" });
+  selector.addEventListener("change", () => { if (selector.value) location.hash = `#/ventas/${selector.value}`; });
+  const estados = { vigente: ["ok", "Vigente"], con_devoluciones: ["media", "Con devoluciones"], anulado: ["alta", "Anulada"] };
+  const recargar = () => vistaVentas(elegido);
+
+  const tarjetas = tickets.map((t) => {
+    const zona = h("div", {});
+    const activas = t.lines.filter((l) => l.active > 0);
+    const [nivel, texto] = estados[t.status];
+    return h("section", { class: "tarjeta" },
+      h("div", { class: "cabecera", style: "margin-bottom:6px" },
+        h("h2", { style: "margin:0;flex:1" }, `${hora(t.occurred_at)} · ${dinero(t.net_minor)}`),
+        h("span", { class: "etiqueta-estado " + nivel }, texto)),
+      t.net_minor !== t.total_minor ? h("p", { class: "tenue pequeno" }, `Cobrado al vender: ${dinero(t.total_minor)}`) : null,
+      h("ul", { class: "lineas" }, t.lines.map((l) => h("li", { class: "linea" },
+        h("span", { class: "nombre" }, `${l.quantity} × ${l.name}`),
+        h("span", { class: "importe" }, dinero(l.unit_price_minor * l.quantity)),
+        h("span", { class: "tenue pequeno" }, l.voided ? "Anulada" : l.returned ? `Devueltas ${l.returned}` : `${dinero(l.unit_price_minor)} c/u`),
+        l.active > 0 ? h("span", {}, h("button", { class: "boton", onclick: () => {
+          zona.replaceChildren(formularioMotivo({
+            titulo: `Devolver ${l.name}`, boton: "Registrar devolución", maximo: l.active,
+            alCancelar: () => zona.replaceChildren(),
+            alConfirmar: async (motivo, n) => {
+              const r = await api("/devoluciones", { method: "POST", body: { command_id: uuid(), seq: l.seq, quantity: n, reason: motivo, occurred_at: ahora() } });
+              aviso(`Devolución registrada: ${dinero(-r.revenue_minor)} a devolver al cliente. Stock: ${r.stock}.`);
+              await recargar();
+            },
+          }));
+        } }, "Devolver")) : h("span", {})))),
+      activas.length ? h("div", { class: "acciones" }, h("button", { class: "boton peligro", onclick: () => {
+        zona.replaceChildren(formularioMotivo({
+          titulo: "Anular la venta completa (para ventas registradas por error). Para un cliente que trae productos, use «Devolver».",
+          boton: "Anular venta", alCancelar: () => zona.replaceChildren(),
+          alConfirmar: async (motivo) => {
+            const r = await api("/anulaciones/ticket", { method: "POST", body: { command_id: uuid(), ticket_id: t.ticket_id, reason: motivo, occurred_at: ahora() } });
+            aviso(`Venta anulada (${dinero(-r.revenue_minor)}).`);
+            actualizarContador();
+            await recargar();
+          },
+        }));
+      } }, "Anular venta")) : null,
+      zona);
+  });
+  const total = tickets.reduce((s, t) => s + t.net_minor, 0);
+  vista.replaceChildren(pagina("Ventas", h("div", { class: "acciones", style: "margin:0" }, selector,
+      h("a", { class: "boton", href: "#/caja" }, "Ir a la caja")),
+    h("p", { class: "tenue" }, tickets.length
+      ? `${plural(tickets.length, "venta", "ventas")} el ${dia(elegido, true)} · neto ${dinero(total)}`
+      : `No hay ventas el ${dia(elegido, true)}.`),
+    h("div", { class: "rejilla" }, tarjetas)));
+}
+
 function vistaNuevo() {
   vista.replaceChildren(pagina("Nuevo producto", h("a", { class: "boton", href: "#/productos" }, "Volver"),
     h("div", { class: "tarjeta" }, formularioProducto(null, (p) => { location.hash = `#/producto/${encodeURIComponent(p.sku)}`; }))));
@@ -589,11 +711,8 @@ async function vistaProducto(sku) {
     h("section", { class: "tarjeta" }, h("h2", {}, "Últimos movimientos"),
       datos.movements.length ? h("div", { class: "tabla-desplazable" }, h("table", {},
         h("thead", {}, h("tr", {}, h("th", {}, "Día"), h("th", {}, "Tipo"), h("th", { class: "num" }, "Cantidad"),
-          h("th", { class: "num" }, "Stock después"), h("th", { class: "ocultar-movil" }, "Nota"))),
-        h("tbody", {}, datos.movements.map((m) => h("tr", {},
-          h("td", {}, dia(m.day)), h("td", {}, TIPOS[m.kind]),
-          h("td", { class: "num" }, (m.kind === "receive" ? "+" : "−") + m.quantity),
-          h("td", { class: "num" }, m.stock_after), h("td", { class: "ocultar-movil tenue" }, m.note || ""))))))
+          h("th", { class: "num ocultar-movil" }, "Stock después"), h("th", {}, ""))),
+        h("tbody", {}, datos.movements.map((m) => filaMovimiento(m, () => vistaProducto(sku))))))
         : h("p", { class: "tenue" }, "Sin movimientos todavía."))));
   for (const s of vista.querySelectorAll("section.tarjeta")) s.style.marginTop = "14px";
 }
@@ -786,11 +905,12 @@ const RUTAS = {
   productos: () => vistaProductos(),
   nuevo: () => vistaNuevo(),
   producto: (sku) => vistaProducto(sku),
+  ventas: (diaElegido) => vistaVentas(diaElegido),
   alertas: () => vistaAlertas(),
   resumen: () => vistaResumen(),
   ajustes: () => vistaAjustes(),
 };
-const SECCION = { nuevo: "productos", producto: "productos" };
+const SECCION = { nuevo: "productos", producto: "productos", ventas: "caja" };
 
 async function mostrar() {
   for (const limpiar of alSalir.splice(0)) limpiar();

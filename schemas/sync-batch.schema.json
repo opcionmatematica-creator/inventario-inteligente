@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Inventory telemetry batch v1",
-  "description": "Delta de movimientos contiguos. Validar además continuidad, conteos, zona IANA y tamaño UTF-8 <=262144 bytes.",
+  "title": "Inventory telemetry batch v1/v2",
+  "description": "Delta de movimientos contiguos. v1: solo filas diarias brutas. v2: además «adjustments» (anulaciones y devoluciones con signo). Validar además continuidad, conteos, zona IANA y tamaño UTF-8 <=262144 bytes.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -20,7 +20,10 @@
   "properties": {
     "schema_version": {
       "type": "integer",
-      "const": 1
+      "enum": [
+        1,
+        2
+      ]
     },
     "batch_id": {
       "type": "string",
@@ -61,7 +64,7 @@
     },
     "rows": {
       "type": "array",
-      "minItems": 1,
+      "minItems": 0,
       "maxItems": 500,
       "items": {
         "type": "object",
@@ -127,6 +130,109 @@
           }
         }
       }
+    },
+    "adjustments": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 500,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "product_ref",
+          "day",
+          "kind",
+          "metric",
+          "units",
+          "revenue_minor",
+          "cogs_minor",
+          "waste_minor",
+          "seq",
+          "stock_after"
+        ],
+        "properties": {
+          "product_ref": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$"
+          },
+          "day": {
+            "type": "string",
+            "format": "date",
+            "description": "Día al que se aplica: el del original en una anulación, el de la devolución en una devolución."
+          },
+          "kind": {
+            "enum": [
+              "void",
+              "return"
+            ]
+          },
+          "metric": {
+            "enum": [
+              "received_units",
+              "sold_units",
+              "waste_units"
+            ]
+          },
+          "units": {
+            "type": "integer",
+            "description": "Con signo: se suma a la métrica de la fila (producto, día)."
+          },
+          "revenue_minor": {
+            "type": "integer"
+          },
+          "cogs_minor": {
+            "type": "integer"
+          },
+          "waste_minor": {
+            "type": "integer"
+          },
+          "seq": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "stock_after": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      }
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "schema_version": {
+            "const": 1
+          }
+        }
+      },
+      "then": {
+        "not": {
+          "required": [
+            "adjustments"
+          ]
+        },
+        "properties": {
+          "rows": {
+            "minItems": 1
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "schema_version": {
+            "const": 2
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "adjustments"
+        ]
+      }
+    }
+  ]
 }

@@ -108,6 +108,39 @@ class ServerTests(ServerCase):
         status, body, _ = self.call("GET", "/api/v1/exportar/plantilla-productos.csv", headers={"X-Inventario": None})
         self.assertIn("sku;nombre", body.decode("utf-8"))
 
+    def test_ticket_history_returns_and_voids_over_http(self):
+        self.call("POST", "/api/v1/productos", {"sku": "A", "price": 1000, "cost": 600, "initial_stock": 10})
+        self.call("POST", "/api/v1/productos", {"sku": "B", "price": 500, "cost": 300, "initial_stock": 10})
+        self.call("POST", "/api/v1/ventas", {"ticket_id": "t1", "lines": [{"sku": "A", "quantity": 2},
+                                                                           {"sku": "B", "quantity": 1}]})
+        self.call("POST", "/api/v1/ventas", {"ticket_id": "t2", "lines": [{"sku": "B", "quantity": 3}]})
+        status, tickets, _ = self.call("GET", "/api/v1/ventas")
+        self.assertEqual([t["ticket_id"] for t in tickets], ["t2", "t1"])
+        line_a = tickets[1]["lines"][0]
+        self.assertEqual((line_a["sku"], line_a["quantity"], line_a["active"]), ("A", 2, 2))
+        status, receipt, _ = self.call("POST", "/api/v1/devoluciones", {
+            "command_id": "d1", "seq": line_a["seq"], "quantity": 1, "reason": "Llegó roto"})
+        self.assertEqual((status, receipt["stock"], receipt["revenue_minor"]), (200, 9, -1000))
+        self.assertEqual(self.call("POST", "/api/v1/devoluciones", {
+            "command_id": "d2", "seq": line_a["seq"], "quantity": 5, "reason": "x"})[0], 422)
+        self.assertEqual(self.call("POST", "/api/v1/devoluciones", {
+            "command_id": "d3", "seq": line_a["seq"], "quantity": 1})[0], 422)  # sin motivo
+        status, voided, _ = self.call("POST", "/api/v1/anulaciones/ticket", {
+            "command_id": "a1", "ticket_id": "t2", "reason": "Cobrada dos veces"})
+        self.assertEqual((status, voided["revenue_minor"]), (200, -1500))
+        status, tickets, _ = self.call("GET", "/api/v1/ventas")
+        states = {t["ticket_id"]: t["status"] for t in tickets}
+        self.assertEqual(states, {"t1": "con_devoluciones", "t2": "anulado"})
+        status, products, _ = self.call("GET", "/api/v1/productos/B")
+        entry = next(m for m in products["movements"] if m["kind"] == "receive")
+        status, receipt, _ = self.call("POST", "/api/v1/anulaciones", {
+            "command_id": "a2", "seq": entry["seq"], "reason": "Entrada repetida"})
+        self.assertEqual(status, 422)  # B ya vendió: quedaría negativo
+        self.assertIn("negativo", receipt["detail"])
+        summary = self.call("GET", "/api/v1/tablero")[1]["today_summary"]
+        self.assertEqual((summary["sold_units"], summary["revenue_minor"]), (2, 1500))
+        self.assertEqual(self.call("GET", "/api/v1/ventas?dia=no-es-fecha")[0], 422)
+
     def test_movements_counts_and_validation(self):
         self.call("POST", "/api/v1/productos", {"sku": "P", "price": 100, "cost": 50})
         status, receipt, _ = self.call("POST", "/api/v1/movimientos", {

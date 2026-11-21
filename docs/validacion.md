@@ -86,7 +86,7 @@ energía. No se han instalado dependencias ni realizado commits.
 
 Ejecutado en Linux, Python 3.12.3:
 
-- `python3 -m unittest discover -s tests -v`: **54 pruebas aprobadas** (las 27 originales sin
+- `python3 -m unittest discover -s tests -v`: **54 pruebas aprobadas** (62 desde las anulaciones) (las 27 originales sin
   cambios, más catálogo, tickets, conteos, migración de bases antiguas, analítica sobre el
   historial, CSV, equivalencia de la demanda en forma cerrada con la repetición día a día y la API
   HTTP real, incluido el acceso remoto por la IP de la red local).
@@ -117,8 +117,19 @@ Ejecutado en Linux, Python 3.12.3:
   desbordaba la pantalla y su botón «Importar» quedaba dentro de una caja con desplazamiento; venta
   diaria «2.252» (se leía como miles); plurales «día(s)»; confirmación al registrar 1.000 o más.
 
-Pendiente antes de vender a comercios: probar en Windows real; devoluciones y anulaciones (hoy un error
-de tecleo solo se corrige con un conteo, que queda como merma);
+### Anulaciones y devoluciones (21 de noviembre de 2026)
+
+- 62 pruebas aprobadas. Nuevas: anular una entrada equivocada (2424 en vez de 24) sin dejar merma,
+  idempotencia, no anular dos veces ni una anulación, motivo obligatorio, stock que no puede quedar
+  negativo, devoluciones parciales al precio cobrado y en su día, anular el resto de una venta con
+  devoluciones, anular una devolución, anular un ticket entero de forma atómica, historial de tickets,
+  venta neta en resumen, demanda y «más vendidos», lote v2 con `adjustments` (privacidad, reenvío
+  idempotente, la nube neta los totales, rechazo de ajustes manipulados) y la API HTTP.
+- JSON Schema validado con `jsonschema` contra lotes v1 y v2 reales; rechaza v1 con ajustes y v2 sin ellos.
+- Interfaz con Playwright (15 pasos): devolver una línea, anular el ticket, resumen del día neto 0,
+  anular la entrada de 2424 desde la ficha, motivo visible en el historial, sin desbordes a 390 px.
+
+Pendiente antes de vender a comercios: probar en Windows real;
 usuarios con PIN y permisos (cajero/propietario); escaneo con cámara; instalador sin Python
 previo; integración con facturación electrónica DIAN o con el POS autorizado del comercio;
 licencias/planes en el software; piloto con comercios reales.

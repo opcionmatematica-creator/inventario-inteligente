@@ -27,7 +27,13 @@ PRODUCT_MIGRATIONS = (
     ("moq", "INTEGER NOT NULL DEFAULT 1"),
     ("active", "INTEGER NOT NULL DEFAULT 1"),
 )
-EVENT_MIGRATIONS = (("sku", "TEXT"), ("kind", "TEXT"), ("day", "TEXT"), ("note", "TEXT"), ("quantity", "INTEGER"))
+EVENT_MIGRATIONS = (("sku", "TEXT"), ("kind", "TEXT"), ("day", "TEXT"), ("note", "TEXT"), ("quantity", "INTEGER"),
+                    ("ref_seq", "INTEGER"), ("sold_delta", "INTEGER"))
+TICKET_MIGRATIONS = (("day", "TEXT"),)
+# Movimientos compensatorios: nunca se borra la historia (ver docs/arquitectura.md).
+COMPENSATIONS = ("void", "return")
+# Métrica de unidades que mueve cada tipo, como en las filas de sincronización.
+METRIC = {"receive": "received_units", "sale": "sold_units", "waste": "waste_units"}
 
 
 class PriceChanged(ValueError):
@@ -72,6 +78,22 @@ def _instant(occurred_at: str) -> datetime:
     if instant.utcoffset() is None:
         raise ValueError("se requiere fecha con zona horaria")
     return instant
+
+
+def _sold_delta(item: dict) -> int:
+    """Efecto de un evento en las unidades vendidas netas (venta +, devolución/anulación −)."""
+    if item["kind"] == "sale":
+        return item["quantity"]
+    if item["kind"] in COMPENSATIONS and item.get("metric") == "sold_units":
+        return item["units"]
+    return 0
+
+
+def stock_delta(item: dict) -> int:
+    """Cambio de stock que produjo un evento (cualquier tipo)."""
+    if item["kind"] in COMPENSATIONS:
+        return item["units"] if item["metric"] == "received_units" else -item["units"]
+    return item["quantity"] if item["kind"] == "receive" else -item["quantity"]
 
 
 def _command_id(value) -> str:
@@ -124,21 +146,32 @@ class Edge:
 
     def _migrate(self):
         with transaction(self.db):
-            for table, columns in (("products", PRODUCT_MIGRATIONS), ("events", EVENT_MIGRATIONS)):
+            for table, columns in (("products", PRODUCT_MIGRATIONS), ("events", EVENT_MIGRATIONS),
+                                   ("tickets", TICKET_MIGRATIONS)):
                 existing = {row[1] for row in self.db.execute(f"PRAGMA table_info({table})")}
                 for name, ddl in columns:
                     if name not in existing:
                         self.db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
             # Eventos anteriores a las columnas indexadas: se rellenan desde el payload.
-            for row in self.db.execute("SELECT seq, payload FROM events WHERE sku IS NULL OR quantity IS NULL").fetchall():
+            for row in self.db.execute("SELECT seq, payload FROM events WHERE sku IS NULL OR quantity IS NULL"
+                                       " OR sold_delta IS NULL").fetchall():
                 item = json.loads(row["payload"])
-                self.db.execute("UPDATE events SET sku=?, kind=?, day=?, quantity=? WHERE seq=?",
-                                (item["sku"], item["kind"], item["day"], item["quantity"], row["seq"]))
+                self.db.execute("UPDATE events SET sku=?, kind=?, day=?, quantity=?, sold_delta=?, ref_seq=? WHERE seq=?",
+                                (item["sku"], item["kind"], item["day"], item["quantity"], _sold_delta(item),
+                                 item.get("ref_seq"), row["seq"]))
+            # Tickets anteriores a la columna day (solo los de venta tienen «day» en el recibo).
+            for row in self.db.execute("SELECT ticket_id, receipt FROM tickets WHERE day IS NULL").fetchall():
+                day = json.loads(row["receipt"]).get("occurred_at") and json.loads(row["receipt"]).get("day")
+                if day:
+                    self.db.execute("UPDATE tickets SET day=? WHERE ticket_id=?", (day, row["ticket_id"]))
             self.db.executescript("""
                 CREATE UNIQUE INDEX IF NOT EXISTS products_barcode ON products(barcode) WHERE barcode IS NOT NULL;
                 CREATE INDEX IF NOT EXISTS events_day ON events(day);
                 CREATE INDEX IF NOT EXISTS events_sku_day ON events(sku, day);
                 CREATE INDEX IF NOT EXISTS events_kind_day ON events(kind, day, sku, quantity);
+                CREATE INDEX IF NOT EXISTS events_ref ON events(ref_seq) WHERE ref_seq IS NOT NULL;
+                CREATE INDEX IF NOT EXISTS tickets_day ON tickets(day) WHERE day IS NOT NULL;
+                CREATE INDEX IF NOT EXISTS events_sold ON events(day, sku, sold_delta) WHERE sold_delta <> 0;
             """)
 
     def close(self):
@@ -261,10 +294,181 @@ class Edge:
                    "low_stock": stock <= product["minimum"],
                    "gross_margin_minor": payload["revenue_minor"] - payload["cogs_minor"]}
         self.db.execute("UPDATE products SET stock=? WHERE sku=?", (stock, sku))
-        self.db.execute("INSERT INTO events(command_id, request, payload, receipt, sku, kind, day, note, quantity)"
-                        " VALUES(?,?,?,?,?,?,?,?,?)",
-                        (command_id, request, canonical(payload), canonical(receipt), sku, kind, day, note, quantity))
+        self.db.execute("INSERT INTO events(command_id, request, payload, receipt, sku, kind, day, note, quantity,"
+                        " sold_delta) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                        (command_id, request, canonical(payload), canonical(receipt), sku, kind, day, note, quantity,
+                         _sold_delta(payload)))
         return receipt
+
+    # ---------------------------------------------------------
+    # Anulaciones y devoluciones (movimientos compensatorios)
+    # ---------------------------------------------------------
+
+    def _event(self, seq: int) -> dict:
+        if type(seq) is not int:
+            raise ValueError("movimiento inválido")
+        row = self.db.execute("SELECT seq, command_id, payload FROM events WHERE seq=?", (seq,)).fetchone()
+        if row is None:
+            raise ValueError("movimiento desconocido")
+        return {"seq": row["seq"], "command_id": row["command_id"], **json.loads(row["payload"])}
+
+    def _status(self, seq: int) -> dict:
+        """Estado de un movimiento: si está anulado y cuántas unidades se devolvieron (devoluciones vigentes)."""
+        voided = self.db.execute("SELECT 1 FROM events WHERE ref_seq=? AND kind='void'", (seq,)).fetchone() is not None
+        returned = self.db.execute(
+            "SELECT coalesce(sum(r.quantity), 0) FROM events r WHERE r.ref_seq=? AND r.kind='return'"
+            " AND NOT EXISTS (SELECT 1 FROM events v WHERE v.ref_seq=r.seq AND v.kind='void')", (seq,)).fetchone()[0]
+        return {"voided": voided, "returned": returned}
+
+    def _compensate(self, command_id: str, original: dict, kind: str, quantity: int, day: str,
+                    request: str, reason: str) -> dict:
+        """Registra un movimiento que deshace `quantity` unidades del original. Dentro de una transacción."""
+        product = self.product(original["sku"])
+        if original["kind"] in COMPENSATIONS:  # anular una devolución: rehace la venta devuelta
+            metric, units = original["metric"], -original["units"]
+            factor = 1
+            money = {k: -original[k] for k in ("revenue_minor", "cogs_minor", "waste_minor")}
+        else:
+            metric, units = METRIC[original["kind"]], -quantity
+            money = {k: -(original[k] // original["quantity"]) * quantity
+                     for k in ("revenue_minor", "cogs_minor", "waste_minor")}
+            factor = quantity
+        payload = {"sku": original["sku"], "day": day, "kind": kind, "quantity": quantity if factor else 0,
+                   **money, "ref_seq": original["seq"], "metric": metric, "units": units}
+        stock = product["stock"] + stock_delta(payload)
+        if stock < 0:
+            raise ValueError(f"no se puede: dejaría el stock de {product['name'] or product['sku']} en negativo"
+                             f" (hay {product['stock']})")
+        payload["stock_after"] = stock
+        receipt = {"command_id": command_id, "sku": original["sku"], "stock": stock, "kind": kind,
+                   "ref_seq": original["seq"], "low_stock": stock <= product["minimum"],
+                   "revenue_minor": money["revenue_minor"]}
+        self.db.execute("UPDATE products SET stock=? WHERE sku=?", (stock, original["sku"]))
+        self.db.execute("INSERT INTO events(command_id, request, payload, receipt, sku, kind, day, note, quantity,"
+                        " ref_seq, sold_delta) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                        (command_id, request, canonical(payload), canonical(receipt), original["sku"], kind, day,
+                         reason, payload["quantity"], original["seq"], _sold_delta(payload)))
+        return receipt
+
+    def _void_one(self, command_id: str, seq: int, occurred_at: str, reason: str, request: str) -> dict:
+        original = self._event(seq)
+        if original["kind"] == "void":
+            raise ValueError("una anulación no se puede anular")
+        status = self._status(seq)
+        if status["voided"]:
+            raise ValueError("ese movimiento ya está anulado")
+        quantity = original["quantity"]
+        if original["kind"] == "sale":
+            quantity -= status["returned"]  # lo devuelto ya está compensado
+            if quantity == 0:
+                raise ValueError("esa venta ya se devolvió completa")
+        if original["kind"] == "return" and self._status(original["ref_seq"])["voided"]:
+            raise ValueError("la venta de esa devolución está anulada")
+        _instant(occurred_at)
+        # La anulación corrige el día del movimiento original: el error «no ocurrió».
+        return self._compensate(command_id, original, "void", quantity, original["day"], request, reason)
+
+    def void(self, command_id: str, seq: int, occurred_at: str, reason: str) -> dict:
+        """Anula un movimiento (entrada, merma, venta o devolución) con un movimiento compensatorio."""
+        _command_id(command_id)
+        reason = _text("motivo", reason, maximum=200, required=True)
+        request = canonical(["void", seq, occurred_at, reason])
+        with transaction(self.db):
+            previous = self.db.execute("SELECT request, receipt FROM events WHERE command_id=?", (command_id,)).fetchone()
+            if previous:
+                if previous["request"] != request:
+                    raise ValueError("command_id reutilizado con contenido diferente")
+                return json.loads(previous["receipt"])
+            return self._void_one(command_id, seq, occurred_at, reason, request)
+
+    def return_sale(self, command_id: str, seq: int, quantity: int, occurred_at: str, reason: str) -> dict:
+        """Devolución de un cliente sobre una línea de venta: repone stock y descuenta ingreso y costo cobrados."""
+        _command_id(command_id)
+        integer(quantity=quantity)
+        if quantity == 0:
+            raise ValueError("cantidad debe ser positiva")
+        reason = _text("motivo", reason, maximum=200, required=True)
+        day = self._day(occurred_at)
+        request = canonical(["return", seq, quantity, occurred_at, reason])
+        with transaction(self.db):
+            previous = self.db.execute("SELECT request, receipt FROM events WHERE command_id=?", (command_id,)).fetchone()
+            if previous:
+                if previous["request"] != request:
+                    raise ValueError("command_id reutilizado con contenido diferente")
+                return json.loads(previous["receipt"])
+            original = self._event(seq)
+            if original["kind"] != "sale":
+                raise ValueError("solo se devuelven ventas")
+            status = self._status(seq)
+            if status["voided"]:
+                raise ValueError("esa venta está anulada")
+            pending = original["quantity"] - status["returned"]
+            if quantity > pending:
+                raise ValueError(f"solo quedan {pending} por devolver de esa venta")
+            return self._compensate(command_id, original, "return", quantity, day, request, reason)
+
+    def void_ticket(self, command_id: str, ticket_id: str, occurred_at: str, reason: str) -> dict:
+        """Anula todas las líneas vigentes de un ticket a la vez (todo o nada)."""
+        _command_id(command_id)
+        reason = _text("motivo", reason, maximum=200, required=True)
+        request = canonical(["void_ticket", ticket_id, occurred_at, reason])
+        with transaction(self.db):
+            previous = self.db.execute("SELECT request, receipt FROM tickets WHERE ticket_id=?", (command_id,)).fetchone()
+            if previous:
+                if previous["request"] != request:
+                    raise ValueError("command_id reutilizado con contenido diferente")
+                return json.loads(previous["receipt"])
+            if not self.db.execute("SELECT 1 FROM tickets WHERE ticket_id=?", (ticket_id,)).fetchone():
+                raise ValueError("ticket desconocido")
+            lines = []
+            for row in self._ticket_events(ticket_id):
+                status = self._status(row["seq"])
+                if status["voided"] or row["quantity"] == status["returned"]:
+                    continue
+                lines.append(self._void_one(f"{command_id}#{len(lines) + 1}", row["seq"], occurred_at, reason,
+                                            canonical(["void", row["seq"], occurred_at, reason])))
+            if not lines:
+                raise ValueError("ese ticket ya está anulado o devuelto por completo")
+            receipt = {"command_id": command_id, "ticket_id": ticket_id, "lines": lines,
+                       "revenue_minor": sum(line["revenue_minor"] for line in lines)}
+            self.db.execute("INSERT INTO tickets(ticket_id, request, receipt) VALUES(?,?,?)",
+                            (command_id, request, canonical(receipt)))
+        return receipt
+
+    def _ticket_events(self, ticket_id: str) -> list[dict]:
+        # Las líneas se guardan como «ticket#n»: rango sobre la clave única (usa el índice;
+        # «$» es el carácter siguiente a «#»).
+        rows = self.db.execute("SELECT seq FROM events WHERE command_id >= ? AND command_id < ? AND kind='sale'"
+                               " ORDER BY seq", (ticket_id + "#", ticket_id + "$")).fetchall()
+        return [self._event(row[0]) for row in rows]
+
+    def tickets(self, *, day: str | None = None, limit: int = 50) -> list[dict]:
+        """Tickets de venta (más recientes primero) con el estado de cada línea."""
+        # Solo los tickets de venta tienen día (las anulaciones de ticket se guardan sin él).
+        if day:
+            rows = self.db.execute("SELECT ticket_id, receipt FROM tickets WHERE day=? ORDER BY rowid DESC LIMIT ?",
+                                   (day, limit))
+        else:
+            rows = self.db.execute("SELECT ticket_id, receipt FROM tickets WHERE day IS NOT NULL"
+                                   " ORDER BY rowid DESC LIMIT ?", (limit,))
+        out = []
+        for row in rows:
+            receipt = json.loads(row["receipt"])
+            lines, net = [], 0
+            for event in self._ticket_events(row["ticket_id"]):
+                status = self._status(event["seq"])
+                name = self.db.execute("SELECT name FROM products WHERE sku=?", (event["sku"],)).fetchone()
+                unit = event["revenue_minor"] // event["quantity"]
+                active = 0 if status["voided"] else event["quantity"] - status["returned"]
+                net += unit * active
+                lines.append({"seq": event["seq"], "sku": event["sku"], "name": name[0] if name else event["sku"],
+                              "quantity": event["quantity"], "unit_price_minor": unit,
+                              "returned": status["returned"], "voided": status["voided"], "active": active})
+            out.append({"ticket_id": row["ticket_id"], "occurred_at": receipt["occurred_at"], "day": receipt["day"],
+                        "total_minor": receipt["total_minor"], "net_minor": net, "lines": lines,
+                        "status": "anulado" if all(l["voided"] for l in lines)
+                        else "con_devoluciones" if any(l["returned"] or l["voided"] for l in lines) else "vigente"})
+        return out
 
     def _check_line(self, kind, quantity, unit_price_minor):
         if kind not in KINDS:
@@ -334,7 +538,8 @@ class Edge:
             receipt = {"ticket_id": ticket_id, "occurred_at": occurred_at, "day": day,
                        "total_minor": total, "lines": results,
                        "low_stock": sorted({r["sku"] for r in results if r["low_stock"]})}
-            self.db.execute("INSERT INTO tickets VALUES(?,?,?)", (ticket_id, request, canonical(receipt)))
+            self.db.execute("INSERT INTO tickets(ticket_id, request, receipt, day) VALUES(?,?,?,?)",
+                            (ticket_id, request, canonical(receipt), day))
         return receipt
 
     def adjust_count(self, command_id: str, sku: str, counted: int, occurred_at: str) -> dict | None:
@@ -360,7 +565,8 @@ class Edge:
             return self._apply(command_id, sku, kind, quantity, day, None, request, note)
 
     def movements(self, *, sku: str | None = None, limit: int = 100) -> list[dict]:
-        sql = ("SELECT e.seq, e.command_id, e.sku, e.kind, e.day, e.note, e.payload, p.name"
+        sql = ("SELECT e.seq, e.command_id, e.sku, e.kind, e.day, e.note, e.payload, e.ref_seq, p.name,"
+               " EXISTS (SELECT 1 FROM events v WHERE v.ref_seq = e.seq AND v.kind = 'void') AS voided"
                " FROM events e LEFT JOIN products p ON p.sku = e.sku")
         args: list = []
         if sku:
@@ -375,26 +581,35 @@ class Edge:
                         "name": row["name"], "kind": row["kind"], "day": row["day"], "note": row["note"],
                         "quantity": item["quantity"], "revenue_minor": item["revenue_minor"],
                         "cogs_minor": item["cogs_minor"], "waste_minor": item["waste_minor"],
-                        "stock_after": item["stock_after"]})
+                        "stock_after": item["stock_after"], "stock_delta": stock_delta(item),
+                        "ref_seq": row["ref_seq"], "voided": bool(row["voided"]),
+                        "ticket_id": row["command_id"].rsplit("#", 1)[0] if item["kind"] == "sale" and "#" in row["command_id"] else None})
         return out
 
     def daily_units(self, kind: str = "sale", *, since: str = "", sku: str | None = None) -> dict[str, dict[str, int]]:
-        """{sku: {día: unidades}} de un tipo de movimiento, desde `since` (incluido)."""
-        sql = "SELECT sku, day, sum(quantity) FROM events WHERE kind=? AND day>=?"
-        args: list = [kind, since]
+        """{sku: {día: unidades}} desde `since` (incluido). Para ventas: netas de devoluciones y
+        anulaciones (un día con venta neta 0 no aparece); para otros tipos, brutas."""
+        if kind == "sale":
+            sql = "SELECT sku, day, sum(sold_delta) FROM events WHERE sold_delta <> 0 AND day>=?"
+            args: list = [since]
+        else:
+            sql = "SELECT sku, day, sum(quantity) FROM events WHERE kind=? AND day>=?"
+            args = [kind, since]
         if sku is not None:
             sql += " AND sku=?"
             args.append(sku)
         out: dict[str, dict[str, int]] = {}
         for row in self.db.execute(sql + " GROUP BY sku, day", args):
-            out.setdefault(row[0], {})[row[1]] = row[2]
+            if row[2] > 0:
+                out.setdefault(row[0], {})[row[1]] = row[2]
         return out
 
     def top_sellers(self, *, since: str, limit: int = 12) -> list[dict]:
         """Productos activos más vendidos desde `since` (para la caja sin búsqueda)."""
         rows = self.db.execute(
-            "SELECT p.* FROM (SELECT sku, sum(quantity) AS units FROM events WHERE kind='sale' AND day>=?"
-            " GROUP BY sku ORDER BY units DESC LIMIT ?) s JOIN products p ON p.sku = s.sku WHERE p.active=1"
+            "SELECT p.* FROM (SELECT sku, sum(sold_delta) AS units FROM events WHERE sold_delta <> 0 AND day>=?"
+            " GROUP BY sku HAVING units > 0 ORDER BY units DESC LIMIT ?) s JOIN products p ON p.sku = s.sku"
+            " WHERE p.active=1"
             " ORDER BY s.units DESC", (since, limit)).fetchall()
         return [dict(row) for row in rows]
 
@@ -418,10 +633,11 @@ class Edge:
         if date.fromisoformat(start_day) >= date.fromisoformat(end_day):
             raise ValueError("intervalo inválido")
         totals = {"sold_units": 0, "revenue_minor": 0, "cogs_minor": 0, "waste_minor": 0}
-        for row in self.db.execute("SELECT payload FROM events WHERE day >= ? AND day < ? ORDER BY seq",
+        # Neto: las devoluciones y anulaciones llevan unidades e importes con signo.
+        for row in self.db.execute("SELECT payload, sold_delta FROM events WHERE day >= ? AND day < ? ORDER BY seq",
                                    (start_day, end_day)):
             item = json.loads(row[0])
-            totals["sold_units"] += item["quantity"] if item["kind"] == "sale" else 0
+            totals["sold_units"] += row[1]
             for key in ("revenue_minor", "cogs_minor", "waste_minor"):
                 totals[key] += item[key]
         return {"start_day": start_day, "end_day_exclusive": end_day,

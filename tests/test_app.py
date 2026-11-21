@@ -287,3 +287,145 @@ class DemandEquivalenceTests(unittest.TestCase):
             edge.add_product(f"P{i:03d}", price=10, cost=5)
         self.assertEqual(len(Insights(edge).reports()), 520)
         self.assertEqual(len([a for a in Insights(edge).alerts() if a["type"] == "sin_stock"]), 520)
+
+
+class CompensationTests(unittest.TestCase):
+    """Anulaciones y devoluciones: movimientos compensatorios, nunca se borra la historia."""
+
+    DAY1, DAY2 = "2026-09-21", "2026-09-23"
+
+    def setUp(self):
+        self.folder = TemporaryDirectory()
+        self.addCleanup(self.folder.cleanup)
+        self.edge = Edge(Path(self.folder.name) / "edge.sqlite3")
+        self.addCleanup(lambda: self.edge.close())
+        self.edge.add_product("A", price=1000, cost=600, minimum=1)
+        self.edge.add_product("B", price=250, cost=100)
+        self.edge.move("r1", "A", "receive", 10, at(self.DAY1, 8))
+        self.edge.move("r2", "B", "receive", 10, at(self.DAY1, 8))
+
+    def seq(self, command_id):
+        return self.edge.db.execute("SELECT seq FROM events WHERE command_id=?", (command_id,)).fetchone()[0]
+
+    def summary(self, day):
+        following = (date.fromisoformat(day) + timedelta(days=1)).isoformat()
+        return self.edge.weekly_summary(day, following)
+
+    def test_void_wrong_receive_restores_stock_without_waste(self):
+        # El caso real: se tecleó 2424 en vez de 24.
+        self.edge.move("error", "A", "receive", 2424, at(self.DAY1, 9))
+        receipt = self.edge.void("anula-1", self.seq("error"), at(self.DAY2), "Error de tecleo: eran 24")
+        self.assertEqual((receipt["stock"], self.edge.product("A")["stock"]), (10, 10))
+        self.assertEqual(self.edge.void("anula-1", self.seq("error"), at(self.DAY2), "Error de tecleo: eran 24"), receipt)
+        self.assertEqual(self.summary(self.DAY1)["waste_minor"], 0)  # no queda como merma
+        history = self.edge.movements(sku="A")
+        self.assertEqual([m["kind"] for m in history], ["void", "receive", "receive"])
+        self.assertTrue(history[1]["voided"])
+        self.assertEqual(history[0]["day"], self.DAY1)  # corrige el día del original
+        self.assertEqual(history[0]["stock_delta"], -2424)
+        with self.assertRaisesRegex(ValueError, "ya está anulado"):
+            self.edge.void("anula-2", self.seq("error"), at(self.DAY2), "otra vez")
+        with self.assertRaisesRegex(ValueError, "no se puede anular"):
+            self.edge.void("anula-3", self.seq("anula-1"), at(self.DAY2), "anular la anulación")
+        with self.assertRaisesRegex(ValueError, "motivo"):
+            self.edge.void("anula-4", self.seq("r2"), at(self.DAY2), "  ")
+
+    def test_void_receive_needs_the_stock_to_still_be_there(self):
+        self.edge.sell("t1", [{"sku": "A", "quantity": 8}], at(self.DAY1, 10))
+        with self.assertRaisesRegex(ValueError, "negativo"):
+            self.edge.void("x", self.seq("r1"), at(self.DAY2), "recepción duplicada")
+        self.assertEqual(self.edge.product("A")["stock"], 2)
+
+    def test_partial_returns_and_void_of_the_rest(self):
+        self.edge.sell("t1", [{"sku": "A", "quantity": 3, "unit_price_minor": 900}], at(self.DAY1, 10))
+        line = self.seq("t1#1")
+        returned = self.edge.return_sale("dev-1", line, 1, at(self.DAY2), "Llegó dañado")
+        self.assertEqual((returned["stock"], returned["revenue_minor"]), (8, -900))  # al precio cobrado
+        self.assertEqual(self.summary(self.DAY2)["revenue_minor"], -900)  # día de la devolución
+        self.assertEqual(self.summary(self.DAY2)["cogs_minor"], -600)
+        self.assertEqual(self.summary(self.DAY2)["sold_units"], -1)
+        with self.assertRaisesRegex(ValueError, "solo quedan 2"):
+            self.edge.return_sale("dev-2", line, 3, at(self.DAY2), "todo")
+        with self.assertRaisesRegex(ValueError, "solo se devuelven ventas"):
+            self.edge.return_sale("dev-3", self.seq("r1"), 1, at(self.DAY2), "no es venta")
+        voided = self.edge.void("anula", line, at(self.DAY2), "Venta registrada por error")
+        self.assertEqual((voided["stock"], voided["revenue_minor"]), (10, -1800))  # solo las 2 pendientes
+        self.assertEqual(self.summary(self.DAY1)["revenue_minor"], 900)  # 2700 − 1800 anulado ese día
+        with self.assertRaisesRegex(ValueError, "anulada"):
+            self.edge.return_sale("dev-4", line, 1, at(self.DAY2), "tarde")
+        total = self.edge.weekly_summary("2026-09-21", "2026-09-28")
+        self.assertEqual((total["revenue_minor"], total["cogs_minor"], total["sold_units"]), (0, 0, 0))
+
+    def test_void_of_a_return_puts_the_sale_back(self):
+        self.edge.sell("t1", [{"sku": "A", "quantity": 2}], at(self.DAY1, 10))
+        self.edge.return_sale("dev", self.seq("t1#1"), 2, at(self.DAY2), "cambio de opinión")
+        self.edge.void("anula-dev", self.seq("dev"), at(self.DAY2), "La devolución no era de esta tienda")
+        self.assertEqual(self.edge.product("A")["stock"], 8)
+        self.assertEqual(self.summary(self.DAY2)["revenue_minor"], 0)
+        self.assertEqual(self.edge.return_sale("dev-2", self.seq("t1#1"), 2, at(self.DAY2), "ahora sí")["stock"], 10)
+
+    def test_void_whole_ticket_atomically_and_ticket_history(self):
+        lines = [{"sku": "A", "quantity": 2}, {"sku": "B", "quantity": 4}]
+        self.edge.sell("t1", lines, at(self.DAY1, 10))
+        self.edge.sell("t2", [{"sku": "B", "quantity": 1}], at(self.DAY1, 11))
+        self.edge.return_sale("dev", self.seq("t1#2"), 1, at(self.DAY1, 12), "sobraba")
+        receipt = self.edge.void_ticket("anula-t1", "t1", at(self.DAY1, 13), "Cliente no pagó")
+        self.assertEqual([line["sku"] for line in receipt["lines"]], ["A", "B"])
+        self.assertEqual(receipt["revenue_minor"], -2000 - 750)  # B: solo las 3 no devueltas
+        self.assertEqual(self.edge.void_ticket("anula-t1", "t1", at(self.DAY1, 13), "Cliente no pagó"), receipt)
+        with self.assertRaisesRegex(ValueError, "ya está anulado"):
+            self.edge.void_ticket("anula-t1-bis", "t1", at(self.DAY1, 13), "otra vez")
+        self.assertEqual((self.edge.product("A")["stock"], self.edge.product("B")["stock"]), (10, 9))
+        tickets = {t["ticket_id"]: t for t in self.edge.tickets(day=self.DAY1)}
+        self.assertEqual(set(tickets), {"t1", "t2"})  # la anulación no aparece como ticket
+        self.assertEqual((tickets["t1"]["status"], tickets["t1"]["net_minor"]), ("anulado", 0))
+        self.assertEqual((tickets["t2"]["status"], tickets["t2"]["net_minor"]), ("vigente", 250))
+        self.assertEqual(self.summary(self.DAY1)["revenue_minor"], 250)
+        with self.assertRaisesRegex(ValueError, "desconocido"):
+            self.edge.void_ticket("x", "no-existe", at(self.DAY1), "x")
+
+    def test_demand_and_top_sellers_use_net_sales(self):
+        self.edge.sell("t1", [{"sku": "A", "quantity": 4}, {"sku": "B", "quantity": 3}], at(self.DAY1, 10))
+        self.edge.void("v", self.seq("t1#1"), at(self.DAY1, 11), "error")
+        self.edge.return_sale("d", self.seq("t1#2"), 1, at(self.DAY2), "dañado")
+        units = self.edge.daily_units("sale")
+        self.assertEqual(units, {"B": {self.DAY1: 3}})  # A anulada; el día de la devolución neta negativa no cuenta
+        self.assertEqual([p["sku"] for p in self.edge.top_sellers(since=self.DAY1)], ["B"])
+
+    def test_sync_sends_adjustments_as_v2_and_cloud_nets_them(self):
+        from inventario.sync import Gateway, Receiver, validate_batch
+        self.edge.sell("t1", [{"sku": "A", "quantity": 3}], at(self.DAY1, 10))
+        gateway = Gateway(self.edge)
+        cloud = Receiver(Path(self.folder.name) / "cloud.sqlite3")
+        self.addCleanup(cloud.close)
+        first = gateway.prepare()
+        self.assertEqual(first["schema_version"], 1)  # sin compensaciones: contrato v1 intacto
+        gateway.acknowledge(cloud.accept(first))
+        self.edge.return_sale("d", self.seq("t1#1"), 1, at(self.DAY2), "dañado")
+        self.edge.void("v", self.seq("r2"), at(self.DAY2), "recepción duplicada")
+        second = gateway.prepare()
+        self.assertEqual((second["schema_version"], len(second["rows"]), len(second["adjustments"])), (2, 0, 2))
+        text = canonical_text(second)  # privacidad: sin SKU, identificadores de comando ni motivos
+        for secret in ('"A"', '"B"', "sku", "command_id", "dañado", "duplicada", "ref_seq"):
+            self.assertNotIn(secret, text)
+        ack = cloud.accept(second)
+        self.assertEqual(cloud.accept(second), ack)  # reenvío idempotente
+        gateway.acknowledge(ack)
+        rows = {json.loads(b)["day"] + json.loads(b)["product_ref"][:4]: json.loads(b)
+                for (b,) in cloud.db.execute("SELECT body FROM daily")}
+        sold = sum(r["sold_units"] for r in rows.values())
+        received = sum(r["received_units"] for r in rows.values())
+        revenue = sum(r["revenue_minor"] for r in rows.values())
+        self.assertEqual((sold, received, revenue), (2, 10, 2000))  # 3−1 vendidas; 20−10 recibidas
+        tampered = json.loads(json.dumps(second))
+        tampered["adjustments"][0]["kind"] = "regalo"
+        with self.assertRaises(ValueError):
+            validate_batch(tampered)
+        tampered = json.loads(json.dumps(second))
+        tampered["adjustments"][1]["seq"] = tampered["adjustments"][0]["seq"]
+        with self.assertRaises(ValueError):
+            validate_batch(tampered)
+
+
+def canonical_text(value) -> str:
+    return json.dumps(value, ensure_ascii=False)

@@ -19,6 +19,17 @@ TOTALS = ("received_units", "sold_units", "waste_units", "revenue_minor", "cogs_
 ROW_KEYS = {"product_ref", "day", "event_count", "last_seq", "stock_after", *TOTALS}
 ENVELOPE_KEYS = {"schema_version", "batch_id", "stream_id", "created_at", "timezone",
                  "currency", "money_scale", "first_seq", "last_seq", "event_count", "rows"}
+# v2 = v1 + «adjustments»: anulaciones y devoluciones como deltas con signo que la nube suma a
+# la fila (producto, día). Las filas de v1 no cambian (totales brutos, sin negativos).
+ADJUSTMENT_KEYS = {"product_ref", "day", "kind", "metric", "units", "revenue_minor", "cogs_minor",
+                   "waste_minor", "seq", "stock_after"}
+UNIT_METRICS = ("received_units", "sold_units", "waste_units")
+
+
+def _signed(**values):
+    for name, value in values.items():
+        if type(value) is not int:
+            raise ValueError(f"{name} debe ser un entero")
 
 
 def digest(batch: dict) -> str:
@@ -27,11 +38,13 @@ def digest(batch: dict) -> str:
 
 def validate_batch(batch: dict) -> None:
     """Valida forma y relaciones; JSON Schema acompaña el contrato publicado."""
-    if not isinstance(batch, dict) or set(batch) != ENVELOPE_KEYS:
+    version = batch.get("schema_version") if isinstance(batch, dict) else None
+    expected = ENVELOPE_KEYS | ({"adjustments"} if version == 2 else set())
+    if not isinstance(batch, dict) or set(batch) != expected:
         raise ValueError("envoltura inválida")
     if len(canonical(batch).encode()) > MAX_BYTES:
         raise ValueError("lote demasiado grande")
-    if type(batch["schema_version"]) is not int or batch["schema_version"] != 1:
+    if type(batch["schema_version"]) is not int or batch["schema_version"] not in (1, 2):
         raise ValueError("versión desconocida")
     if batch["currency"] != "COP" or type(batch["money_scale"]) is not int or batch["money_scale"] != 2:
         raise ValueError("moneda/escala no soportada por esta referencia")
@@ -46,7 +59,11 @@ def validate_batch(batch: dict) -> None:
         raise ValueError("cantidad o secuencia inválida")
     if batch["last_seq"] - batch["first_seq"] + 1 != batch["event_count"]:
         raise ValueError("rango no contiguo")
-    if not isinstance(batch["rows"], list) or not 1 <= len(batch["rows"]) <= MAX_EVENTS:
+    adjustments = batch.get("adjustments", [])
+    if version == 2 and (not isinstance(adjustments, list) or not 1 <= len(adjustments) <= MAX_EVENTS):
+        raise ValueError("ajustes inválidos")
+    minimum_rows = 0 if version == 2 else 1
+    if not isinstance(batch["rows"], list) or not minimum_rows <= len(batch["rows"]) <= MAX_EVENTS:
         raise ValueError("filas inválidas")
     seen = set()
     row_sequences = set()
@@ -65,7 +82,22 @@ def validate_batch(batch: dict) -> None:
             raise ValueError("fila o secuencia duplicada")
         seen.add(key)
         row_sequences.add(row["last_seq"])
-    if sum(row["event_count"] for row in batch["rows"]) != batch["event_count"]:
+    for item in adjustments:
+        if not isinstance(item, dict) or set(item) != ADJUSTMENT_KEYS:
+            raise ValueError("ajuste inválido")
+        if not isinstance(item["product_ref"], str) or not re.fullmatch(r"[0-9a-f]{32}", item["product_ref"]):
+            raise ValueError("referencia inválida")
+        if date.fromisoformat(item["day"]).isoformat() != item["day"]:
+            raise ValueError("día inválido")
+        if item["kind"] not in ("void", "return") or item["metric"] not in UNIT_METRICS:
+            raise ValueError("tipo de ajuste inválido")
+        _signed(units=item["units"], revenue_minor=item["revenue_minor"], cogs_minor=item["cogs_minor"],
+                waste_minor=item["waste_minor"])
+        integer(seq=item["seq"], stock_after=item["stock_after"])
+        if not batch["first_seq"] <= item["seq"] <= batch["last_seq"] or item["seq"] in row_sequences:
+            raise ValueError("secuencia de ajuste inválida")
+        row_sequences.add(item["seq"])
+    if sum(row["event_count"] for row in batch["rows"]) + len(adjustments) != batch["event_count"]:
         raise ValueError("conteo no coincide")
     if max(row_sequences) != batch["last_seq"]:
         raise ValueError("última secuencia no coincide")
@@ -93,10 +125,17 @@ class Gateway:
                                 (state["ack_seq"], max_events)).fetchall()
             if not events:
                 return None
-            rows = {}
+            rows, adjustments = {}, []
             for event in events:
                 item = json.loads(event["payload"])
                 ref = hmac.new(self.key, item["sku"].encode(), hashlib.sha256).hexdigest()[:32]
+                if item["kind"] in ("void", "return"):
+                    adjustments.append({"product_ref": ref, "day": item["day"], "kind": item["kind"],
+                                        "metric": item["metric"], "units": item["units"],
+                                        "revenue_minor": item["revenue_minor"], "cogs_minor": item["cogs_minor"],
+                                        "waste_minor": item["waste_minor"], "seq": event["seq"],
+                                        "stock_after": item["stock_after"]})
+                    continue
                 key = (ref, item["day"])
                 row = rows.setdefault(key, {"product_ref": ref, "day": item["day"],
                                            "event_count": 0, "last_seq": 0, "stock_after": 0,
@@ -108,10 +147,13 @@ class Gateway:
                 row["event_count"] += 1
                 row["last_seq"] = event["seq"]
                 row["stock_after"] = item["stock_after"]
-            batch = {"schema_version": 1, "batch_id": str(uuid4()), "stream_id": self.edge.stream_id,
+            batch = {"schema_version": 2 if adjustments else 1, "batch_id": str(uuid4()),
+                     "stream_id": self.edge.stream_id,
                      "created_at": datetime.now(timezone.utc).isoformat(), "timezone": self.edge.timezone,
                      "currency": "COP", "money_scale": 2, "first_seq": events[0]["seq"],
                      "last_seq": events[-1]["seq"], "event_count": len(events), "rows": list(rows.values())}
+            if adjustments:
+                batch["adjustments"] = adjustments
             validate_batch(batch)
             db.execute("UPDATE sync_state SET pending=? WHERE singleton=1", (canonical(batch),))
             return batch
@@ -168,6 +210,19 @@ class Receiver:
                     old = json.loads(previous[0])
                     for field in (*TOTALS, "event_count"):
                         total[field] += old[field]
+                self.db.execute("INSERT OR REPLACE INTO daily VALUES(?,?,?,?)", (*key, canonical(total)))
+            for item in batch.get("adjustments", []):
+                key = (batch["stream_id"], item["product_ref"], item["day"])
+                previous = self.db.execute("SELECT body FROM daily WHERE stream_id=? AND product_ref=? AND day=?", key).fetchone()
+                total = json.loads(previous[0]) if previous else {
+                    "product_ref": item["product_ref"], "day": item["day"], "event_count": 0, "last_seq": 0,
+                    "stock_after": 0, **dict.fromkeys(TOTALS, 0)}
+                total[item["metric"]] += item["units"]
+                for field in ("revenue_minor", "cogs_minor", "waste_minor"):
+                    total[field] += item[field]
+                total["event_count"] += 1
+                if item["seq"] > total["last_seq"]:
+                    total["last_seq"], total["stock_after"] = item["seq"], item["stock_after"]
                 self.db.execute("INSERT OR REPLACE INTO daily VALUES(?,?,?,?)", (*key, canonical(total)))
             ack = make_ack(batch)
             self.db.execute("INSERT INTO batches VALUES(?,?,?)", (batch["batch_id"], hashed, canonical(ack)))

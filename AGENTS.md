@@ -37,7 +37,7 @@ python3 --version
 # Ejecutar el entorno de demostración local.
 python3 -m inventario.demo
 
-# Ejecutar las pruebas (54, sin red ni dependencias).
+# Ejecutar las pruebas (62, sin red ni dependencias).
 python3 -m unittest discover -s tests -v
 
 # Abrir la app de escritorio / solo el servidor / datos de ejemplo.
@@ -134,6 +134,12 @@ dependencias de terceros (`pyproject.toml` no declara ninguna). El DDL usa
   la salida a red al gateway y la autoridad del stock al Core.
 - Reenviar el lote pendiente sin cambios hasta recibir su ACK válido. No
   duplicar deltas ni sumar `stock_after` como si fuera un movimiento.
+- Anulaciones y devoluciones: movimientos compensatorios (`void`, `return`) con `ref_seq` al
+  original y motivo obligatorio (`note`); nunca editar ni borrar eventos. Una anulación se aplica
+  al día del original; una devolución, al día en que ocurre y al precio cobrado. Una venta con
+  devoluciones solo anula lo pendiente; no se anula una anulación. `sold_delta` (columna) da la
+  venta neta que usan resumen, demanda y «más vendidos». En sincronización viajan como
+  `adjustments` (lote v2, ver `docs/sincronizacion.md`).
 - Las recomendaciones son borradores con razones; no enviar órdenes a
   proveedores automáticamente.
 - No realizar commits, pushes, merges ni publicaciones salvo instrucción

@@ -6,6 +6,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
 import android.view.ViewGroup;
@@ -21,6 +22,7 @@ import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.FrameLayout;
 import android.widget.Toast;
+import android.window.OnBackInvokedDispatcher;
 
 import java.net.URLEncoder;
 import java.util.concurrent.ExecutorService;
@@ -74,6 +76,12 @@ public class MainActivity extends Activity {
         setContentView(raiz);
 
         configurarWebView();
+        // Android 13+: con targetSdk 36 el sistema ya no llama a onBackPressed (retroceso
+        // predictivo). Atrás navega el historial de la WebView y, en la raíz, cierra la app.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
+                    OnBackInvokedDispatcher.PRIORITY_DEFAULT, this::atras);
+        }
 
         if (estado != null) {
             web.restoreState(estado);
@@ -134,7 +142,12 @@ public class MainActivity extends Activity {
                 if (archivosPendientes != null) archivosPendientes.onReceiveValue(null);
                 archivosPendientes = respuesta;
                 try {
-                    startActivityForResult(parametros.createIntent(), PEDIR_ARCHIVO);
+                    // Sin filtrar por tipo: un CSV llega como text/csv, text/comma-separated-values,
+                    // application/vnd.ms-excel o text/plain según la app de origen. El servidor valida.
+                    Intent pedir = parametros.createIntent();
+                    pedir.setType("*/*");
+                    pedir.removeExtra(Intent.EXTRA_MIME_TYPES);
+                    startActivityForResult(pedir, PEDIR_ARCHIVO);
                 } catch (Exception e) {
                     archivosPendientes = null;
                     Toast.makeText(MainActivity.this, R.string.sin_selector, Toast.LENGTH_LONG).show();
@@ -317,13 +330,70 @@ public class MainActivity extends Activity {
             Toast.makeText(this, R.string.descarga_fallida, Toast.LENGTH_LONG).show();
             return;
         }
+        // «text/csv; charset=utf-8» → «text/csv»: con parámetros, MediaStore y el selector
+        // de archivos no reconocen el tipo y el archivo sale atenuado.
+        final String tipo = mime == null ? "application/octet-stream" : mime.split(";")[0].trim();
+        String nombre = URLUtil.guessFileName(url, disposicion, tipo);
+        String cookie = CookieManager.getInstance().getCookie(url);
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            descargarConDownloadManager(uri, agente, tipo, nombre, cookie);
+            return;
+        }
+        // Android 10+: la app descarga y guarda en «Descargas» con MediaStore (sin permisos).
+        // DownloadManager no es fiable en algunas capas (MIUI/HyperOS no ejecutaba el trabajo).
+        Toast.makeText(this, R.string.descargando, Toast.LENGTH_SHORT).show();
+        hilo.execute(() -> {
+            String error = null;
+            Uri destino = null;
+            java.net.HttpURLConnection conexion = null;
+            try {
+                conexion = (java.net.HttpURLConnection) new java.net.URL(url).openConnection();
+                conexion.setConnectTimeout(8000);
+                conexion.setReadTimeout(60000);
+                if (cookie != null) conexion.setRequestProperty("Cookie", cookie);
+                conexion.setRequestProperty("User-Agent", agente);
+                if (conexion.getResponseCode() != 200) {
+                    throw new java.io.IOException("HTTP " + conexion.getResponseCode());
+                }
+                android.content.ContentValues datos = new android.content.ContentValues();
+                datos.put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, nombre);
+                datos.put(android.provider.MediaStore.MediaColumns.MIME_TYPE, tipo);
+                datos.put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS);
+                datos.put(android.provider.MediaStore.MediaColumns.IS_PENDING, 1);
+                android.content.ContentResolver resolver = getContentResolver();
+                destino = resolver.insert(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, datos);
+                if (destino == null) throw new java.io.IOException("sin destino");
+                try (java.io.InputStream entrada = conexion.getInputStream();
+                     java.io.OutputStream salida = resolver.openOutputStream(destino)) {
+                    byte[] bufer = new byte[64 * 1024];
+                    int leidos;
+                    while ((leidos = entrada.read(bufer)) > 0) salida.write(bufer, 0, leidos);
+                }
+                datos.clear();
+                datos.put(android.provider.MediaStore.MediaColumns.IS_PENDING, 0);
+                resolver.update(destino, datos, null, null);
+            } catch (Exception e) {
+                error = e.getMessage();
+                if (destino != null) {
+                    try { getContentResolver().delete(destino, null, null); } catch (Exception ignorada) { }
+                }
+            } finally {
+                if (conexion != null) conexion.disconnect();
+            }
+            final boolean ok = error == null;
+            runOnUiThread(() -> {
+                if (destruida) return;
+                Toast.makeText(this, ok ? getString(R.string.descargado, nombre)
+                        : getString(R.string.descarga_fallida), Toast.LENGTH_LONG).show();
+            });
+        });
+    }
+
+    private void descargarConDownloadManager(Uri uri, String agente, String mime, String nombre, String cookie) {
         try {
             DownloadManager.Request pet = new DownloadManager.Request(uri);
-            String cookie = CookieManager.getInstance().getCookie(url);
             if (cookie != null) pet.addRequestHeader("Cookie", cookie);
             pet.addRequestHeader("User-Agent", agente);
-            pet.addRequestHeader("X-Inventario", "1");
-            String nombre = URLUtil.guessFileName(url, disposicion, mime);
             pet.setTitle(nombre);
             pet.setMimeType(mime);
             pet.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
@@ -346,13 +416,17 @@ public class MainActivity extends Activity {
 
     // ------------------------------------------------------------ ciclo de vida
 
-    @Override
-    public void onBackPressed() {
+    private void atras() {
         if (web.canGoBack()) {
             web.goBack();
         } else {
-            super.onBackPressed();
+            finish();
         }
+    }
+
+    @Override
+    public void onBackPressed() {  // Android 12 y anteriores
+        atras();
     }
 
     @Override

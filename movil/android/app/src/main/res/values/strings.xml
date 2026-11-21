@@ -6,4 +6,5 @@
     <string name="descargando">Descargando…</string>
     <string name="descarga_fallida">No se pudo iniciar la descarga</string>
     <string name="sin_selector">No hay ninguna aplicación para elegir archivos.</string>
+    <string name="descargado">Guardado en Descargas: %1$s</string>
 </resources>

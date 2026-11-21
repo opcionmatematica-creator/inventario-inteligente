@@ -210,6 +210,11 @@ async function enviarPendientes() {
 // Caja
 // ---------------------------------------------------------
 
+// En pantallas táctiles, enfocar el buscador abre el teclado y tapa media pantalla:
+// el foco automático solo se usa con ratón/teclado (lector de códigos USB).
+const TACTIL = window.matchMedia("(pointer: coarse)").matches;
+function enfocar(el) { if (!TACTIL) el.focus(); }
+
 function vistaCaja() {
   let carrito = memoria.leer("carrito", []);
   let resultados = [];
@@ -243,7 +248,7 @@ function vistaCaja() {
     else carrito.push({ sku: producto.sku, name: producto.name, price: producto.price, stock: producto.stock, quantity: 1 });
     pintarTicket();
     buscador.value = "";
-    buscador.focus();
+    enfocar(buscador);
     masVendidos();
   }
 
@@ -358,7 +363,7 @@ function vistaCaja() {
     } finally {
       cobrando = false;
       pintarTicket();
-      buscador.focus();
+      enfocar(buscador);
     }
   }
 
@@ -377,7 +382,7 @@ function vistaCaja() {
         cobrar, h("div", { class: "acciones" }, vaciar))), barra));
   pintarTicket();
   masVendidos();
-  buscador.focus();
+  enfocar(buscador);
 }
 
 // ---------------------------------------------------------
@@ -420,7 +425,7 @@ async function vistaProductos() {
       h("a", { class: "boton", href: "#/ajustes" }, "Importar CSV"),
       h("a", { class: "boton primario", href: "#/nuevo" }, "Nuevo producto")),
     h("div", { class: "tarjeta" },
-      h("div", { class: "fila-campos" }, buscador,
+      h("div", { class: "filtros" }, buscador,
         h("label", { class: "casilla", for: "ver-inactivos" }, inactivos, "Ver desactivados")),
       resumen,
       h("div", { class: "tabla-desplazable" }, h("table", {},
@@ -428,7 +433,7 @@ async function vistaProductos() {
           h("th", { class: "num ocultar-movil" }, "Mínimo"), h("th", { class: "num" }, "Precio"), h("th", {}, "Estado"))),
         cuerpo)))));
   await cargar();
-  buscador.focus();
+  enfocar(buscador);
 }
 
 function formularioProducto(producto, alGuardar) {
@@ -538,6 +543,8 @@ async function vistaProducto(sku) {
       e.preventDefault();
       let n;
       try { n = leerEntero(cantidad.value, "Cantidad", tipo.value === "count" ? 0 : 1); } catch (error) { aviso(error.message, true); return; }
+      // Un dedo de más (24 → 2424) no se deshace fácil: se confirma lo que parece un error.
+      if (n >= 1000 && !confirm(`¿Seguro? Va a registrar ${pesos.format(n)} ${p.unit === "unidad" ? "unidades" : p.unit}.`)) return;
       registrar.disabled = true;
       try {
         if (tipo.value === "count") {
@@ -563,8 +570,8 @@ async function vistaProducto(sku) {
       h("div", { class: "tarjeta cifra" }, h("div", { class: "valor" }, unidades(p.stock, p.unit)), h("div", { class: "etiqueta" }, "En stock "), etiquetaStock(p)),
       h("div", { class: "tarjeta cifra" }, h("div", { class: "valor" }, dinero(p.price)), h("div", { class: "etiqueta" }, `Precio · costo ${dinero(p.cost)}`)),
       h("div", { class: "tarjeta cifra" }, h("div", { class: "valor" }, dinero(p.stock * p.cost)), h("div", { class: "etiqueta" }, "Capital en stock (a costo)")),
-      h("div", { class: "tarjeta cifra" }, h("div", { class: "valor" }, dem.observed_days ? `${dem.daily_mean}` : "—"),
-        h("div", { class: "etiqueta" }, `Venta diaria estimada · ${dem.observed_days} día(s) con datos`))),
+      h("div", { class: "tarjeta cifra" }, h("div", { class: "valor" }, dem.observed_days ? dem.daily_mean.toLocaleString("es-CO", { maximumFractionDigits: 1 }) : "—"),
+        h("div", { class: "etiqueta" }, `Venta diaria estimada · ${plural(dem.observed_days, "día", "días")} con datos`))),
     h("div", { class: "rejilla dos" },
       h("section", { class: "tarjeta" }, h("h2", {}, "Registrar movimiento"), formMov),
       h("section", { class: "tarjeta" }, h("h2", {}, "Análisis"),
@@ -573,8 +580,8 @@ async function vistaProducto(sku) {
           h("span", { class: "etiqueta-estado" + (compra.confidence === "media" ? " ok" : "") }, ` confianza ${compra.confidence}`)),
         h("ul", { class: "tenue pequeno" }, compra.reason_text.map((r) => h("li", {}, r))),
         h("p", {}, "Rotación: ", h("span", { class: "etiqueta-estado " + nivelRot }, rot.status_text),
-          ` · ${rot.days_without_sale} día(s) abiertos sin vender` +
-          (rot.coverage_days !== null ? ` · stock para ${Math.round(rot.coverage_days)} día(s)` : "")),
+          ` · ${plural(rot.days_without_sale, "día abierto", "días abiertos")} sin vender` +
+          (rot.coverage_days !== null ? ` · stock para ${plural(Math.round(rot.coverage_days), "día", "días")}` : "")),
         rot.frozen_capital_minor ? h("p", { class: "pequeno" }, `Capital quieto: ${dinero(rot.frozen_capital_minor)}. Considere promoción o devolución al proveedor.`) : null,
         h("p", { class: "tenue pequeno" }, "Las sugerencias son borradores para revisar; no se envían a ningún proveedor."))),
     h("section", { class: "tarjeta", style: null }, h("h2", {}, "Datos del producto"),
@@ -711,25 +718,27 @@ async function vistaAjustes() {
     try {
       const plan = await api("/importar", { method: "POST", raw: await archivo.files[0].arrayBuffer() });
       const accion = { nuevo: "Nuevo", actualizar: "Actualizar", conflicto: "No se importará" };
-      previa.replaceChildren(
-        h("p", {}, `${plan.new} nuevo(s), ${plan.update} a actualizar, ${plan.conflicts + plan.errors.length} con problemas.`),
+      // replaceChildren pintaría «null» como texto: se filtran los vacíos.
+      previa.replaceChildren(...[
+        h("p", {}, `${plural(plan.new, "nuevo", "nuevos")}, ${plan.update} a actualizar, ${plan.conflicts + plan.errors.length} con problemas.`),
         plan.errors.length ? h("ul", { class: "pequeno" }, plan.errors.slice(0, 50).map((e) =>
           h("li", {}, `Fila ${e.line}${e.sku ? ` (${e.sku})` : ""}: ${e.error}`))) : null,
-        h("table", {}, h("thead", {}, h("tr", {}, h("th", {}, "Fila"), h("th", {}, "Producto"), h("th", { class: "num" }, "Precio"),
-          h("th", { class: "num" }, "Stock inicial"), h("th", {}, "Acción"))),
-        h("tbody", {}, plan.rows.slice(0, 200).map((r) => h("tr", {}, h("td", {}, r.line),
-          h("td", {}, r.name, h("div", { class: "tenue pequeno" }, r.sku)), h("td", { class: "num" }, dinero(r.price)),
-          h("td", { class: "num" }, r.action === "nuevo" ? r.initial_stock : "—"),
-          h("td", {}, r.error ? `${accion[r.action]}: ${r.error}` : accion[r.action]))))),
         h("p", { class: "tenue pequeno" }, "Al actualizar, el stock no cambia: use el conteo físico de cada producto."),
         h("div", { class: "acciones" }, h("button", { class: "boton primario", disabled: !(plan.new + plan.update), onclick: async (e) => {
           e.target.disabled = true;
           try {
             const r = await api(`/importar?aplicar=1&token=${encodeURIComponent(plan.token)}`, { method: "POST" });
-            aviso(`Importación lista: ${r.created} creado(s), ${r.updated} actualizado(s).`);
+            aviso(`Importación lista: ${plural(r.created, "creado", "creados")}, ${plural(r.updated, "actualizado", "actualizados")}.`);
             previa.replaceChildren(); archivo.value = "";
           } catch (error) { aviso(error.message, true); e.target.disabled = false; }
-        } }, "Importar"), h("button", { class: "boton", onclick: () => { previa.replaceChildren(); archivo.value = ""; } }, "Cancelar")));
+        } }, "Importar"), h("button", { class: "boton", onclick: () => { previa.replaceChildren(); archivo.value = ""; } }, "Cancelar")),
+        h("div", { class: "tabla-desplazable" }, h("table", {}, h("thead", {}, h("tr", {}, h("th", { class: "ocultar-movil" }, "Fila"), h("th", {}, "Producto"), h("th", { class: "num" }, "Precio"),
+          h("th", { class: "num ocultar-movil" }, "Stock inicial"), h("th", {}, "Acción"))),
+        h("tbody", {}, plan.rows.slice(0, 200).map((r) => h("tr", {}, h("td", { class: "ocultar-movil" }, r.line),
+          h("td", {}, r.name, h("div", { class: "tenue pequeno" }, r.sku)), h("td", { class: "num" }, dinero(r.price)),
+          h("td", { class: "num ocultar-movil" }, r.action === "nuevo" ? r.initial_stock : "—"),
+          h("td", {}, r.error ? `${accion[r.action]}: ${r.error}` : accion[r.action]))))))
+      ].filter(Boolean));
     } catch (error) { previa.replaceChildren(h("p", { class: "etiqueta-estado alta" }, error.message)); }
   });
   tarjetas.push(h("section", { class: "tarjeta", id: "importar" }, h("h2", {}, "Importar productos (CSV)"),

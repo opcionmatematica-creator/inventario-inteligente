@@ -108,7 +108,9 @@ h2 { font-size: 1.08rem; margin: 0 0 10px; }
   background: var(--superficie); border: 1px solid var(--borde);
   border-radius: var(--radio); padding: 16px; box-shadow: var(--sombra);
 }
-.rejilla { display: grid; gap: 14px; }
+.rejilla { display: grid; gap: 14px; grid-template-columns: minmax(0, 1fr); }
+/* Un hijo de rejilla no se encoge bajo el ancho mínimo de su contenido (tablas): min-width 0. */
+.rejilla > *, .caja > * { min-width: 0; }
 .rejilla.dos { grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
 .cifras { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); margin-bottom: 14px; }
 .cifra .valor { font-size: 1.45rem; font-weight: 700; font-variant-numeric: tabular-nums; }
@@ -144,7 +146,9 @@ input.grande { min-height: 52px; font-size: 1.15rem; }
 table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
 th, td { text-align: left; padding: 9px 8px; border-bottom: 1px solid var(--borde); vertical-align: top; }
 th { font-size: .82rem; color: var(--tenue); font-weight: 600; }
-td.num, th.num { text-align: right; }
+td.num, th.num { text-align: right; white-space: nowrap; }
+.filtros { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; }
+.filtros input[type=search] { flex: 1 1 260px; }
 tr.clic { cursor: pointer; }
 tr.clic:hover td { background: var(--fondo); }
 .tabla-desplazable { overflow-x: auto; }

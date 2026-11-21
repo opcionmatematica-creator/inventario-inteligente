@@ -101,10 +101,24 @@ Ejecutado en Linux, Python 3.12.3:
   20 ms de mediana y 216 ms en p95.
 - Lanzador de escritorio con un navegador simulado: abre, reutiliza el servidor en la segunda
   apertura, se detiene al cerrar la ventana y deja el respaldo diario.
-- App Android: `assembleDebug` y `assembleRelease` (sin firmar) compilan. **No instalada ni
-  probada en un celular.**
+- App Android: `assembleDebug` y `assembleRelease` (sin firmar) compilan.
+- **Celular real** (Redmi 25062RN2DL, Android 16, HyperOS), app instalada por adb, contra un servidor
+  con datos de ejemplo: conexión por cable USB (`adb reverse`) y por Wi-Fi con clave (clave incorrecta →
+  mensaje claro; correcta → caja); venta táctil cobrada desde la barra inferior y verificada en el
+  servidor; ticket conservado al cerrar la app; venta con el PC apagado guardada en el celular y
+  reenviada sola al encenderlo; ficha de producto, entrada de mercancía y conteo físico; exportar CSV
+  a «Descargas»; importar ese CSV con el selector del sistema (vista previa + importar); por Wi-Fi no
+  se muestran la clave ni la carpeta de datos; página de error con «Reintentar» si el PC está apagado.
+- Fallos encontrados en el celular y corregidos: el teclado se abría tras cada toque en la caja y al
+  entrar en Productos; Atrás cerraba la app (Android 16 ya no llama a `onBackPressed` con
+  `targetSdk 36`); `DownloadManager` no ejecutaba la descarga en HyperOS (ahora la app descarga y
+  guarda con MediaStore); el CSV descargado salía atenuado en el selector (tipo con parámetros) y el
+  selector filtraba CSV de otras apps; «null» en la vista previa; la tabla de la vista previa
+  desbordaba la pantalla y su botón «Importar» quedaba dentro de una caja con desplazamiento; venta
+  diaria «2.252» (se leía como miles); plurales «día(s)»; confirmación al registrar 1.000 o más.
 
-Pendiente antes de vender a comercios: probar en Windows real; devoluciones y anulaciones;
+Pendiente antes de vender a comercios: probar en Windows real; devoluciones y anulaciones (hoy un error
+de tecleo solo se corrige con un conteo, que queda como merma);
 usuarios con PIN y permisos (cajero/propietario); escaneo con cámara; instalador sin Python
 previo; integración con facturación electrónica DIAN o con el POS autorizado del comercio;
 licencias/planes en el software; piloto con comercios reales.
